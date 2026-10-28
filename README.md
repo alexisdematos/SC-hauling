@@ -111,6 +111,10 @@ See `smartcitizen/user.ini.example` for the full set.
 - Travel times are straight-line quantum estimates (see the SC-map README).
 - Container sizes and ship capacity are not checked.
 
+## SC-map data
+
+At start, SC-hauling asks the API for `/data/version`. When it changed, it downloads `locations.csv`, `bodies.csv` and `quantum.json` (~26 KB) into `%APPDATA%\SC-hauling\data`. That copy has the very names the API knows, so the routes it asks for always resolve. Offline, it uses the last copy, then the data bundled in the exe. `--scmap PATH` uses a folder as it is, without checking.
+
 ## Build
 
 ```sh

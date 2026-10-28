@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from schauling import keys
+from schauling import datasync, keys
 from schauling.api import JUMP_SECONDS, TYPICAL_HOP_SECONDS, TravelTimes
 from schauling.logparser import parse_delivery, parse_line, parse_pickup, title_route
 from schauling.locations import location_code, place_for_code
@@ -350,6 +350,59 @@ class SessionTest(unittest.TestCase):
             self.assertTrue(s.boarded)
             self.assertTrue(s.ship_changed)
             self.assertEqual(s.last_ship, "RSI Zeus Mk II ES")
+
+
+class DataSyncTest(unittest.TestCase):
+    def fake_api(self, version, calls):
+        files = {name: f"{name} v{version}".encode() for name in datasync.FILES}
+
+        def get(url, timeout):
+            calls.append(url.rsplit("/", 1)[-1])
+            if url.endswith("/data/version"):
+                return json.dumps({"version": version}).encode()
+            return files[url.rsplit("/", 1)[-1]]
+
+        return get
+
+    def test_downloads_only_when_the_version_changes(self):
+        with tempfile.TemporaryDirectory() as d:
+            calls = []
+            folder, status = datasync.sync(d, get=self.fake_api("v1", calls))
+            self.assertEqual(status, "updated to v1")
+            self.assertEqual((Path(d) / "locations.csv").read_text(), "locations.csv vv1")
+            calls.clear()
+            _, status = datasync.sync(d, get=self.fake_api("v1", calls))
+            self.assertEqual((status, calls), ("up to date", ["version"]))
+            calls.clear()
+            _, status = datasync.sync(d, get=self.fake_api("v2", calls))
+            self.assertEqual(status, "updated to v2")
+            self.assertEqual(sorted(calls), sorted(["version"] + datasync.FILES))
+
+    def test_offline_keeps_the_last_copy(self):
+        def down(url, timeout):
+            raise OSError("no network")
+
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(datasync.sync(d, get=down), (None, "offline: no network"))
+            datasync.sync(d, get=self.fake_api("v1", []))
+            folder, status = datasync.sync(d, get=down)
+            self.assertEqual(folder, Path(d))
+            self.assertTrue(status.startswith("offline"))
+
+    def test_cut_download_keeps_the_old_version(self):
+        with tempfile.TemporaryDirectory() as d:
+            datasync.sync(d, get=self.fake_api("v1", []))
+            ok = self.fake_api("v2", [])
+
+            def cut(url, timeout):
+                if url.endswith("quantum.json"):
+                    raise OSError("cut")
+                return ok(url, timeout)
+
+            _, status = datasync.sync(d, get=cut)
+            self.assertTrue(status.startswith("download failed"))
+            self.assertEqual(datasync.local_version(d), "v1")
+            self.assertEqual((Path(d) / "locations.csv").read_text(), "locations.csv vv1")
 
 
 class LocationCodeTest(unittest.TestCase):

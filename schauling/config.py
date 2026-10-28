@@ -44,11 +44,17 @@ def save(cfg):
         pass
 
 
+def data_cache():
+    """Copy of the SC-map data kept in step with the API (see datasync)."""
+    return folder() / "data"
+
+
 def find_scmap_data(path=None):
-    """SC-map data folder: given, bundled in the exe, or SC-map next to this project."""
+    """SC-map data folder, best first: given, the copy synced with the API
+    (same names as the API), bundled in the exe, SC-map next to this project."""
     here = Path(__file__).resolve().parent.parent
     bundled = Path(getattr(sys, "_MEIPASS", here)) / "data"  # PyInstaller unpacks here
-    for p in [path, bundled, here.parent / "SC-map" / "data", here / "data"]:
+    for p in [path, data_cache(), bundled, here.parent / "SC-map" / "data", here / "data"]:
         if p and (Path(p) / "locations.csv").is_file():
             return Path(p)
     return None

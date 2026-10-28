@@ -3,7 +3,7 @@ import argparse
 import sys
 import time
 
-from . import config
+from . import config, datasync
 from .logsource import find_log
 from .report import cargo_lines, route_lines
 from .session import Session
@@ -32,6 +32,9 @@ def main(argv=None):
             config.save(cfg)
     if not log or not log.is_file():
         _fail("Game.log not found: give its path with --log", console)
+    sync_status = None
+    if not args.scmap:  # a folder given by hand is used as it is
+        _, sync_status = datasync.sync(config.data_cache())
     data = config.find_scmap_data(args.scmap)
     if not data:
         _fail("SC-map data not found: give the data folder with --scmap", console)
@@ -44,6 +47,7 @@ def main(argv=None):
         session.travel.ship = session.last_ship  # no --ship given: the last ship flown
 
     if args.once or args.watch:
+        print(f"SC-map data: {data}" + (f" ({sync_status})" if sync_status else ""))
         while True:
             print("\n".join(text for text, *_ in cargo_lines(session.tracker)) or "No hauling contract.")
             print()
