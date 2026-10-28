@@ -1,0 +1,54 @@
+"""User settings, kept in %APPDATA%\\SC-hauling\\config.json."""
+import json
+import os
+import sys
+from pathlib import Path
+
+DEFAULTS = {
+    "log": None,
+    "scmap_data": None,
+    "ship": "Drake Caterpillar",
+    "start": None,
+    "geometry": "+40+200",
+    "alpha": 0.85,
+    "view": "cargo",
+    "manual_pickups": {},
+    "item_names": {},
+    "hidden": [],
+    "auto_showlocation": False,
+    "ship_auto": True,  # follow the last ship flown, from Game.log
+    "hide_outside_game": True,  # hidden while another app is in front of the game
+    "close_with_game": True,  # quit when StarCitizen.exe closes
+}
+
+
+def folder():
+    base = os.environ.get("APPDATA") or Path.home()
+    return Path(base) / "SC-hauling"
+
+
+def load():
+    cfg = dict(DEFAULTS)
+    try:
+        cfg.update(json.loads((folder() / "config.json").read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        pass
+    return cfg
+
+
+def save(cfg):
+    try:
+        folder().mkdir(parents=True, exist_ok=True)
+        (folder() / "config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def find_scmap_data(path=None):
+    """SC-map data folder: given, bundled in the exe, or SC-map next to this project."""
+    here = Path(__file__).resolve().parent.parent
+    bundled = Path(getattr(sys, "_MEIPASS", here)) / "data"  # PyInstaller unpacks here
+    for p in [path, bundled, here.parent / "SC-map" / "data", here / "data"]:
+        if p and (Path(p) / "locations.csv").is_file():
+            return Path(p)
+    return None

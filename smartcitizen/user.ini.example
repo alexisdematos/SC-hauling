@@ -1,0 +1,17 @@
+; Smart Citizen user.ini lines for hauling contracts.
+; Paste them in <Smart Citizen data>\LIVE\user.ini while Smart Citizen is closed,
+; then open Smart Citizen and click Apply Enhancements.
+
+; Mission page, sub-line: the pickup, highlighted.
+hauling_collect_objective=Pick up at <EM4>~mission(location)</EM4>
+; HUD tracker: short line. |Address writes the station in Game.log instead of "Stanton System".
+HaulCargo_obj_itemspecifics_01=~mission(amount)/~mission(total) ~mission(item) > <EM4>~mission(Destination|Address)</EM4>
+; Mission page, delivery line: stock text, destination highlighted.
+hauling_deliver_resource_objective=Deliver ~mission(amount)/~mission(total) SCU of ~mission(item) to <EM4>~mission(Destination|Address|ListAll)</EM4>.
+
+; Contract title: every pickup of Ling Family MultiToSingle hauls (4 pickups,
+; Location to Location3). Shows in the mobiGlas list and lands in Game.log.
+LingFamily_HaulCargo_MultiToSingle_title=Ling Family ~mission(ReputationRank) Cargo Haul - ~mission(CargoGradeToken) Scale - ~mission(Location|Address), ~mission(Location1|Address), ~mission(Location2|Address), ~mission(Location3|Address) > ~mission(Destination|Address) <EM4>[BP]</EM4> <EM4>[100 Rep]</EM4>
+
+; Do not put ~mission(Location) on a delivery line: it is the mission's first
+; pickup, not this cargo's (tested in game, 4.x).
