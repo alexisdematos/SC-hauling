@@ -94,3 +94,61 @@ def we_are_in_front():
 def game_running():
     """True while a StarCitizen.exe process exists."""
     return bool(game_pids())
+
+
+def exclude_from_capture(hwnd, on):
+    """Leave our window out of screenshots (Windows 10 2004+), or put it back."""
+    WDA_NONE, WDA_EXCLUDEFROMCAPTURE = 0x0, 0x11
+    try:
+        ctypes.windll.user32.SetWindowDisplayAffinity(wintypes.HWND(hwnd), WDA_EXCLUDEFROMCAPTURE if on else WDA_NONE)
+    except (AttributeError, OSError):
+        pass
+
+
+def game_window():
+    """The game's main window (its largest visible one), or None. Read-only."""
+    if not available():
+        return None
+    pids = game_pids()
+    if not pids:
+        return None
+    user32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def each(hwnd, _):
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value in pids and user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
+            rect = wintypes.RECT()
+            user32.GetClientRect(hwnd, ctypes.byref(rect))
+            found.append(((rect.right - rect.left) * (rect.bottom - rect.top), hwnd))
+        return True
+
+    user32.EnumWindows(each, 0)
+    return max(found)[1] if found else None
+
+
+GWL_EXSTYLE = -20
+WS_EX_TRANSPARENT = 0x20
+WS_EX_LAYERED = 0x80000
+
+
+def set_click_through(hwnd, on):
+    """Let mouse clicks go through our window to the one under it (the game),
+    or take them again. Needs a layered window: Tk's -alpha makes it one."""
+    user32 = ctypes.windll.user32
+    style = user32.GetWindowLongW(wintypes.HWND(hwnd), GWL_EXSTYLE)
+    new = (style | WS_EX_LAYERED | WS_EX_TRANSPARENT) if on else (style & ~WS_EX_TRANSPARENT)
+    if new != style:
+        user32.SetWindowLongW(wintypes.HWND(hwnd), GWL_EXSTYLE, new)
+
+
+def mouse_button_down():
+    """True while the left or right mouse button is held (a drag in progress)."""
+    get = ctypes.windll.user32.GetAsyncKeyState
+    return bool(get(0x01) & 0x8000 or get(0x02) & 0x8000)
+
+
+def right_button_down():
+    return bool(ctypes.windll.user32.GetAsyncKeyState(0x02) & 0x8000)

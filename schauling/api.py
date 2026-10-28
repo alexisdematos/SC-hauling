@@ -11,8 +11,9 @@ API_URL = "https://versetime-api.ofs.workers.dev"
 DEFAULT_SHIP = "Drake Caterpillar"
 USER_AGENT = "SC-hauling/0.1"
 
-# Jump point transit, gateway to gateway. Rough: the API does not model it.
-JUMP_SECONDS = 600
+# Jump point transit, gateway to gateway: about 5 min in game. The API does
+# not model it.
+JUMP_SECONDS = 300
 # Cost of a leg we cannot price, so the planner still puts it somewhere.
 UNKNOWN_SECONDS = 1800
 # A quantum hop inside one system, when we cannot ask for the real one.
@@ -89,6 +90,15 @@ class TravelTimes:
         t = self._direct(a, b)
         return UNKNOWN_SECONDS if t is None else t
 
+    def systems_between(self, a, b):
+        """Systems the cheapest trip from a to b goes through ([Nyx, Pyro]),
+        or None when both are in the same system."""
+        pa, pb = self.places.get(a), self.places.get(b)
+        if not (pa and pb) or pa.system == pb.system:
+            return None
+        paths = self._system_paths(pa.system, pb.system)
+        return min(paths, key=lambda path: self._through(a, b, path)) if paths else None
+
     def _hop(self, a, b):
         t = self._direct(a, b) if a and b else None
         return TYPICAL_HOP_SECONDS if t is None else t
@@ -139,3 +149,30 @@ class TravelTimes:
             self.cache_file.write_text(json.dumps(known, indent=0), encoding="utf-8")
         except OSError:
             pass
+
+
+def _get_json(url, timeout=15):
+    # Cloudflare answers 403 to Python's default User-Agent.
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def local_times(stops, api_url=API_URL, get=_get_json):
+    """(local time "16:17", phase "Afternoon", is day) at each (place, unix
+    seconds) of `stops`, in order, from the API's /time. None for a place in
+    space (no day cycle) or a failed call."""
+
+    def one(stop):
+        place, at = stop
+        q = urllib.parse.urlencode({"location": place, "at": int(at)})
+        try:
+            data = get(f"{api_url}/time?{q}")
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+        if not data.get("localTime"):
+            return None
+        return data["localTime"], data.get("phaseText") or data.get("phase") or "", bool(data.get("isDay"))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return list(pool.map(one, stops))

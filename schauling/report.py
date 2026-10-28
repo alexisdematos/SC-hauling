@@ -1,4 +1,5 @@
 """Plain-text lines for the overlay and the console."""
+from .routing import peak_load
 from .tracker import GUESS, UNKNOWN
 
 
@@ -38,11 +39,18 @@ def cargo_lines(tracker):
     return out
 
 
-def route_lines(plan):
+def route_lines(plan, capacity=None):
+    """The stops in order; with the ship's cargo SCU, the most aboard at once."""
     out = []
     for i, stop in enumerate(plan.stops, 1):
-        hop = f"  (+{duration(stop.seconds)})" if stop.seconds else ""
-        out.append(f"{i}. {stop.place}{hop}")
+        jump = f", jump {' → '.join(stop.via)}" if stop.via else ""
+        hop = f"  (+{duration(stop.seconds)}{jump})" if stop.seconds else ""
+        # Local time on arrival: will it be day? ☾ when the star is down.
+        when = ""
+        if stop.local:
+            clock, phase, is_day = stop.local
+            when = f"  · {clock} {phase.lower()}" + ("" if is_day else " ☾")
+        out.append(f"{i}. {stop.place}{hop}{when}")
         for a in stop.actions:
             arrow = "↑ load" if a.kind == "pickup" else "↓ unload"
             out.append(f"     {arrow} {_cargo(a.leg)}")
@@ -51,4 +59,9 @@ def route_lines(plan):
         out.append(f"?  {what} place unknown: {_cargo(a.leg)}")
     if plan.stops:
         out.append(f"Total quantum: ~{duration(plan.total_seconds)}")
+        peak = peak_load(plan)
+        if capacity and peak > capacity:
+            out.append(f"Too much: up to {peak} SCU aboard, the ship holds {capacity}")
+        elif capacity:
+            out.append(f"Max aboard: {peak} / {capacity} SCU")
     return out

@@ -18,6 +18,7 @@ from schauling import __version__
 
 ROOT = Path(__file__).resolve().parent
 DATA_FILES = ["locations.csv", "bodies.csv", "quantum.json"]
+OPTIONAL_DATA_FILES = ["ships.json"]  # cargo capacity
 
 
 def main():
@@ -30,6 +31,9 @@ def main():
     data.mkdir(parents=True, exist_ok=True)
     for name in DATA_FILES:
         shutil.copy2(src / name, data / name)
+    for name in OPTIONAL_DATA_FILES:
+        if (src / name).is_file():
+            shutil.copy2(src / name, data / name)
 
     subprocess.run([
         sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--windowed",

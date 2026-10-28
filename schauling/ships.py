@@ -34,6 +34,15 @@ def load_ships(data_dir):
     return sorted({s["name"] for s in data.get("ships", [])})
 
 
+def load_cargo(data_dir):
+    """{ship name: cargo SCU} from SC-map's ships.json; {} without it."""
+    try:
+        data = json.loads((Path(data_dir) / "ships.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {s["name"]: s.get("cargo") or 0 for s in data.get("ships", [])}
+
+
 def piloted_class(line):
     """Entity class of the ship the player just left, or None."""
     m = _RELEASE.search(line)

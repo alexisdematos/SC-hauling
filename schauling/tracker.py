@@ -7,7 +7,7 @@ a leg.
 import re
 from dataclasses import dataclass, field
 
-from .logparser import parse_delivery, parse_line, parse_pickup, strip_tags, title_origins, title_route
+from .logparser import parse_delivery, parse_line, parse_pickup, strip_tags, title_destinations, title_origins
 
 _OBJECTIVE_ID = re.compile(r"^(?P<role>pickup|dropoff)_(?P<phase>[0-9a-f-]+)_(?P<n>\d+)$")
 
@@ -28,14 +28,22 @@ EXACT, GUESS, UNKNOWN = "exact", "guess", "unknown"
 _CODE_WORDS = {
     "haulcargo", "interstellar", "local", "planetary", "stellar", "solar", "extrasmall",
     "small", "medium", "large", "bulk", "supply", "intro", "rehire", "stanton", "pyro", "nyx",
+    "cfp", "hh",  # RedWind_HaulCargo_CFP_RegionLink: who the haul is for
 }
-_ROUTE_SHAPE = re.compile(r"(?i)^(?:atob|(?:single|multi)\d*to(?:single|multi)\d*|linearchain|rounddelivery)$")
+_ROUTE_SHAPE = re.compile(
+    r"(?i)^(?:atob|(?:single|multi)\d*to(?:single|multi)\d*|linearchain|rounddelivery|regionlink)$")
 
 # Contract shapes with a single destination for every cargo.
-SINGLE_DROPOFF = re.compile(r"(?i)_(?:atob|multi\d*tosingle)_")
+SINGLE_DROPOFF = re.compile(r"(?i)_(?:atob|multi\d*tosingle|regionlink)(?:_|$)")
 # AToB contracts define one PickupLocation in the game data: every cargo
-# is picked up there.
-SINGLE_PICKUP = re.compile(r"(?i)_atob_")
+# is picked up there. SingleToMulti and RegionLink (Pyro direct hauls, from
+# global.ini) have one pickup too.
+SINGLE_PICKUP = re.compile(r"(?i)_(?:atob|single\d*tomulti\d*|regionlink)(?:_|$)")
+
+# A screenshot shows a contract's page when this share of its cargos are
+# the contract's (the others: misread names, or cargos the code abbreviates
+# in a way we have not learnt yet).
+PAGE_FIT = 0.6
 
 # Seen in game; anything else is learnt from the log as contracts come.
 KNOWN_ITEMS = {
@@ -74,13 +82,22 @@ def courier_hint(code):
 
 
 def _abbreviates(token, name):
-    """True if each capitalised chunk of the token starts a word of the name in order
-    ("DistSpri" -> "Distilled Spirits")."""
+    """True if each capitalised chunk of the token shortens a word of the name,
+    in order: same first letter, its letters in the word in that order, some
+    dropped ("DistSpri" -> "Distilled Spirits", "FresFoo" -> "Fresh Food")."""
     chunks = re.findall(r"[A-Z][a-z0-9]*|[a-z0-9]+", token)
     words = re.findall(r"[A-Za-z0-9]+", name)
     if not chunks or len(chunks) > len(words):
         return False
-    return all(w.lower().startswith(c.lower()) for c, w in zip(chunks, words))
+
+    def shortens(chunk, word):
+        chunk, word = chunk.lower(), word.lower()
+        if chunk[0] != word[0]:
+            return False
+        rest = iter(word[1:])
+        return all(ch in rest for ch in chunk[1:])
+
+    return all(shortens(c, w) for c, w in zip(chunks, words))
 
 
 @dataclass
@@ -164,8 +181,11 @@ class Stop:
 
 
 class Tracker:
-    def __init__(self, places=None, manual=None, items=None, hidden=None):
+    def __init__(self, places=None, manual=None, items=None, hidden=None, titles=None):
         self.places = places
+        # Title templates from global.ini (titles.TitleTemplates), else the
+        # "- A, B > C, D" shape.
+        self.titles = titles
         self.contracts = {}
         # Pickups the player set by hand: {"<mission>|<phase>|<n>": "Seraphim Station"}.
         self.manual = manual if manual is not None else {}
@@ -234,6 +254,111 @@ class Tracker:
         elif kind == "objective_withdrawn":
             leg.withdrawn = True
 
+    def match_page(self, entries):
+        """Id of the open contract a page read by OCR shows, or None: the one
+        it fits best (see page_fit), destination first."""
+        if not entries:
+            return None
+        best, best_fit = None, 0.0
+        for c in self.active():
+            fit = self.page_fit(c.id, entries)
+            if fit is not None and fit > best_fit:
+                best, best_fit = c.id, fit
+        return best if best_fit >= PAGE_FIT else None
+
+    def page_fit(self, contract_id, entries):
+        """How well a page read by OCR fits this contract, 0 to 1, or None
+        when we cannot tell. A page of another contract (the player clicked
+        on, or picked the menu with another page open) scores low.
+
+        The destinations decide first: a page whose cargos go elsewhere is
+        not this contract's, whatever its cargo names (Ling contracts all
+        carry the same four). Then the cargo names from the log or the code;
+        when we know too few (a Multi2ToSingle code names one cargo of four),
+        the destinations alone."""
+        c = self.contracts.get(contract_id)
+        if c is None or not entries:
+            return 0.0
+        self._expand_legs(c)
+        dest_fit = None
+        if self.places is not None:
+            ours = {self.dropoff_of(c, l).name for l in c.legs.values()}
+            seen = [self.places.closest(e["dest"]) for e in entries if e.get("dest")]
+            seen = [p.name for p in seen if p]
+            if seen and ours - {"?"}:
+                dest_fit = sum(name in ours for name in seen) / len(seen)
+        if dest_fit is not None and dest_fit < PAGE_FIT:
+            return dest_fit
+        # Names from the log, else learnt from other contracts ("ElecEq" is
+        # Audio-Visual Equipment: no way to guess that one).
+        self._guess_items(c)
+        names = {(l.item or l.guessed_item).lower() for l in c.legs.values() if l.item or l.guessed_item}
+        tokens = cargo_tokens(c.code)
+        if len(names) + len(tokens) < len(c.legs) or not (names or tokens):
+            return dest_fit
+
+        def known(item):
+            return item.lower() in names or any(_abbreviates(t, item) for t in tokens)
+
+        return sum(known(e["item"]) for e in entries) / len(entries)
+
+    def pages_for(self, contract_id, pages):
+        """The screenshots' pages that show this contract: those whose cargos
+        fit it, or, when we know none of its cargos, the first one read."""
+        pages = [p for p in pages if p]
+        fits = [(self.page_fit(contract_id, p), p) for p in pages]
+        if any(f is None for f, _ in fits):
+            return pages[:1]
+        return [p for f, p in fits if f >= PAGE_FIT]
+
+    def apply_page(self, contract_id, entries):
+        """Pickups (and missing cargo names) read on the contract page by OCR:
+        [{item, total, dest, origin}] in page order. Each entry goes to the
+        leg with the same cargo and SCU, else to the next leg in order. The
+        pickups count as set by hand. Returns how many pickups were set."""
+        c = self.contracts.get(contract_id)
+        if c is None or self.places is None:
+            return 0
+        self._expand_legs(c)
+        legs = sorted(c.legs.values(), key=lambda l: l.key)
+        free = list(legs)
+        pairs, extra = [], []
+        for e in entries:
+            same = [l for l in free if l.item and l.item.lower() == e["item"].lower() and l.total == e["total"]]
+            # A leg named only from the contract code ("~Distilled Spirits") is still free to name.
+            guessed = [l for l in free if not l.item and l.guessed_item
+                       and l.guessed_item.lower() == e["item"].lower()]
+            leg = (same or guessed or [l for l in free if not l.item] or [None])[0]
+            if leg is None:
+                extra.append(e)
+                continue
+            free.remove(leg)
+            pairs.append((leg, e))
+        # More cargos on the page than the log knows: the page is right. New
+        # legs take the next objective numbers of the contract's one phase.
+        # Not when the code lists one cargo per leg (AToB): then the count is
+        # right and an extra line is a misread. A Multi2ToSingle code names
+        # one cargo of four: the page knows better.
+        phases = {l.key[0] for l in legs}
+        if extra and len(phases) == 1 and len(cargo_tokens(c.code)) != len(legs):
+            phase = phases.pop()
+            n = max((l.key[1] for l in legs), default=-1) + 1
+            for e in extra:
+                leg = c.legs[(phase, n)] = Leg((phase, n))
+                pairs.append((leg, e))
+                n += 1
+        set_count = 0
+        for leg, e in pairs:
+            if not leg.item:
+                leg.item, leg.total = e["item"], e["total"]
+            if not leg.dest_text and e.get("dest") and self.places.closest(e["dest"]):
+                leg.dest_text = self.places.closest(e["dest"]).name
+            origin = self.places.closest(e["origin"]) if e.get("origin") else None
+            if origin:
+                self.manual[self._manual_key(c, leg)] = origin.name
+                set_count += 1
+        return set_count
+
     def hide(self, contract):
         """Drop a contract the player abandoned."""
         self.hidden.add(contract.id)
@@ -244,8 +369,22 @@ class Tracker:
         for c in self.contracts.values():
             self._learn_items(c)
         for c in out:
+            self._expand_legs(c)
             self._guess_items(c)
         return out
+
+    def _expand_legs(self, c):
+        """One-destination contracts deliver each cargo as its own objective
+        (dropoff_<phase>_0…4), but an untracked contract logs a marker for _0
+        only. The code lists every cargo (…_DistSp_Dia_FresFoo_Gol_Aphor):
+        add the missing legs, so they show and the page OCR can fill them."""
+        tokens = cargo_tokens(c.code)
+        phases = {l.key[0] for l in c.legs.values()}
+        if not SINGLE_DROPOFF.search(c.code or "") or len(phases) != 1 or len(tokens) <= len(c.legs):
+            return
+        phase = phases.pop()
+        for n in range(len(tokens)):
+            c.legs.setdefault((phase, n), Leg((phase, n)))
 
     # --- cargo names --------------------------------------------------------
 
@@ -299,6 +438,13 @@ class Tracker:
             return Stop(text, None, confidence)
         return None
 
+    def title_places(self, contract):
+        """(origins, destinations) the contract title lists."""
+        found = self.titles.route(contract.title) if self.titles else None
+        if found:
+            return found
+        return title_origins(contract.title), title_destinations(contract.title)
+
     def _manual_key(self, contract, leg):
         return f"{contract.id}|{leg.key[0]}|{leg.key[1]}"
 
@@ -320,7 +466,7 @@ class Tracker:
         stop = self._own_pickup(contract, leg)
         if stop:
             return stop
-        origins = [self._stop(o, None, GUESS) for o in title_origins(contract.title)]
+        origins = [self._stop(o, None, GUESS) for o in self.title_places(contract)[0]]
         if SINGLE_PICKUP.search(contract.code or ""):
             # One pickup for the whole contract: any leg's, else the title's.
             for other in sorted(contract.legs.values(), key=lambda l: l.key):
@@ -378,8 +524,8 @@ class Tracker:
                 found = self._own_dropoff(contract, other, use_title=False)
                 if found.place is not None:
                     return Stop(found.name, found.place, EXACT)
-        _, dest = title_route(contract.title)
-        found = self._stop(dest, None, EXACT) if dest else None
+        dests = self.title_places(contract)[1]
+        found = self._stop(dests[0], None, EXACT) if len(dests) == 1 else None
         return found if found and found.place is not None else stop
 
     def _own_dropoff(self, contract, leg, use_title=True):
@@ -389,8 +535,25 @@ class Tracker:
         if stop is None and leg.dropoff_positions:
             stop = self._stop(None, leg.dropoff_positions, EXACT)
         if stop is None and use_title:
-            _, dest = title_route(contract.title)
-            stop = self._stop(dest, None, GUESS) if dest else None
+            dests = self.title_places(contract)[1]
+            if len(dests) > 1:
+                # SingleToMulti titles list the drop-offs: remove the ones the
+                # other legs already have. Stock titles list two even when the
+                # contract has three, so one left is still a guess.
+                taken = set()
+                for other in contract.legs.values():
+                    if other is not leg:
+                        found = self._own_dropoff(contract, other, use_title=False)
+                        if found.place is not None:
+                            taken.add(found.name)
+                left = [self._stop(d, None, GUESS) for d in dests]
+                left = [s for s in left if s.name not in taken]
+                if len(left) == 1:
+                    stop = left[0]
+                elif left:
+                    stop = Stop(" / ".join(s.name for s in left), None, GUESS)
+            elif dests:
+                stop = self._stop(dests[0], None, GUESS)
         if stop is None and leg.dest_text:
             stop = Stop(leg.dest_text, None, UNKNOWN)
         return stop or (self._unknown(contract) if use_title else Stop("?", None, UNKNOWN))

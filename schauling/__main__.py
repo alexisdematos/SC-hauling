@@ -1,9 +1,9 @@
-"""python -m schauling [--once] [--log PATH] [--ship NAME] [--from PLACE]"""
+"""python -m schauling [--once] [--check] [--log PATH] [--ship NAME] [--from PLACE]"""
 import argparse
 import sys
 import time
 
-from . import config, datasync
+from . import config, datasync, patchcheck
 from .logsource import find_log
 from .report import cargo_lines, route_lines
 from .session import Session
@@ -18,11 +18,15 @@ def main(argv=None):
     ap.add_argument("--from", dest="start", default=cfg.get("start"), help="where you are now")
     ap.add_argument("--once", action="store_true", help="print the contracts and the route, then exit")
     ap.add_argument("--watch", action="store_true", help="print to the console on each change")
+    ap.add_argument("--live-port", type=int, default=cfg.get("live_port"),
+                    help="port of the local server for the VerseTime map (127.0.0.1 only)")
+    ap.add_argument("--check", action="store_true",
+                    help="check that the log lines and global.ini templates we read are still there, then exit")
     args = ap.parse_args(argv)
     # The Windows console defaults to cp1252, which has no arrows.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    console = args.once or args.watch
+    console = args.once or args.watch or args.check
 
     log = find_log(args.log)
     if (not log or not log.is_file()) and not console:
@@ -32,6 +36,18 @@ def main(argv=None):
             config.save(cfg)
     if not log or not log.is_file():
         _fail("Game.log not found: give its path with --log", console)
+    # A game patch may change what we read: say so once per game version.
+    version, warnings = patchcheck.check(log)
+    if args.check:
+        counts, _ = patchcheck.scan(patchcheck.log_lines(log))
+        print(f"Game {version or '?'}")
+        for what, (seen, read) in counts.items():
+            print(f"  {what:20} {read}/{seen} lines read")
+        print("\n".join(warnings) or "Nothing changed that we can see.")
+        return
+    fresh = patchcheck.new_warnings(cfg, version, warnings)
+    config.save(cfg)
+
     sync_status = None
     if not args.scmap:  # a folder given by hand is used as it is
         _, sync_status = datasync.sync(config.data_cache())
@@ -40,18 +56,21 @@ def main(argv=None):
         _fail("SC-map data not found: give the data folder with --scmap", console)
 
     cfg.setdefault("item_names", {})
+    cfg.setdefault("contract_pages", {})
     session = Session(log, data, args.ship, args.start, manual=cfg.get("manual_pickups", {}),
-                      items=cfg["item_names"], hidden=cfg.get("hidden", []))
+                      items=cfg["item_names"], hidden=cfg.get("hidden", []), pages=cfg["contract_pages"])
 
     if cfg.get("ship_auto") and session.last_ship and args.ship == cfg.get("ship"):
         session.travel.ship = session.last_ship  # no --ship given: the last ship flown
 
     if args.once or args.watch:
         print(f"SC-map data: {data}" + (f" ({sync_status})" if sync_status else ""))
+        for w in warnings:
+            print(f"Patch {version}? {w}")
         while True:
             print("\n".join(text for text, *_ in cargo_lines(session.tracker)) or "No hauling contract.")
             print()
-            print("\n".join(route_lines(session.plan())))
+            print("\n".join(route_lines(session.plan(), session.capacity())))
             if args.once:
                 return
             while not session.update():
@@ -61,7 +80,13 @@ def main(argv=None):
     from .overlay import Overlay
 
     cfg["ship"], cfg["start"] = args.ship, args.start
-    Overlay(session, cfg).run()
+    if args.live_port:
+        cfg["live_port"] = args.live_port
+    overlay = Overlay(session, cfg)
+    if fresh:
+        overlay.status = f"Patch {version}? {fresh[0]}" + (f" (+{len(fresh) - 1})" if len(fresh) > 1 else "")
+        overlay.render()
+    overlay.run()
 
 
 def _ask_log():

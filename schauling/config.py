@@ -15,10 +15,15 @@ DEFAULTS = {
     "manual_pickups": {},
     "item_names": {},
     "hidden": [],
+    "contract_pages": {},  # mission id: objectives read on its page (OCR), applied again at start
     "auto_showlocation": False,
     "ship_auto": True,  # follow the last ship flown, from Game.log
     "hide_outside_game": True,  # hidden while another app is in front of the game
     "close_with_game": True,  # quit when StarCitizen.exe closes
+    "read_contract_page": True,  # OCR of the contract page when a contract is accepted
+    "click_through": True,  # clicks outside the texts go to the game
+    "live_server": True,  # 127.0.0.1 server for the VerseTime map: position and route
+    "live_port": 47823,
 }
 
 

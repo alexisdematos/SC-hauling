@@ -13,5 +13,16 @@ hauling_deliver_resource_objective=Deliver ~mission(amount)/~mission(total) SCU 
 ; Location to Location3). Shows in the mobiGlas list and lands in Game.log.
 LingFamily_HaulCargo_MultiToSingle_title=Ling Family ~mission(ReputationRank) Cargo Haul - ~mission(CargoGradeToken) Scale - ~mission(Location|Address), ~mission(Location1|Address), ~mission(Location2|Address), ~mission(Location3|Address) > ~mission(Destination|Address) <EM4>[BP]</EM4> <EM4>[100 Rep]</EM4>
 
+; Not tested in game yet: route in titles that have none.
+; A tag for a place the contract does not have (Destination2 on a two-stop run)
+; may show as an empty or broken name: remove it if so.
+; Ling Family SingleToMulti: one pickup, the drop-offs.
+LingFamily_HaulCargo_SingleToMulti_title=Ling Family ~mission(ReputationRank) Cargo Haul - ~mission(CargoGradeToken) Scale - ~mission(Location|Address) > ~mission(Destination|Address), ~mission(Destination1|Address), ~mission(Destination2|Address)
+; Stock SingleToMulti titles list two drop-offs only, even on three-stop runs.
+Covalex_HaulCargo_SingleToMulti_title=~mission(ReputationRank) Rank - ~mission(CargoGradeToken) Cargo Haul - ~mission(Location|Address) > ~mission(Destination|Address), ~mission(Destination1|Address), ~mission(Destination2|Address) <EM4>[BP?]</EM4> <EM4>[50–8,000 Rep]</EM4>
+; Red Wind direct hauls (Pyro): A to B.
+RedWind_HaulCargo_CFP_RegionLink_title_001=Red Wind Direct Cargo Haul - ~mission(Location|Address) > ~mission(Destination|Address)
+RedWind_HaulCargo_HH_RegionLink_title_001=Red Wind Direct & Discreet Cargo Haul - ~mission(Location|Address) > ~mission(Destination|Address)
+
 ; Do not put ~mission(Location) on a delivery line: it is the mission's first
 ; pickup, not this cargo's (tested in game, 4.x).

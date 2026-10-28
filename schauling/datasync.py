@@ -14,6 +14,8 @@ from pathlib import Path
 from .api import API_URL, USER_AGENT
 
 FILES = ["locations.csv", "bodies.csv", "quantum.json"]
+# Downloaded when the API lists them (an older API does not): cargo capacity.
+OPTIONAL_FILES = ["ships.json"]
 VERSION_FILE = "version.txt"
 # Start-up must not wait long for the network.
 TIMEOUT_S = 4
@@ -54,7 +56,8 @@ def sync(folder, api_url=API_URL, timeout=TIMEOUT_S, get=_get):
     if version == local_version(folder) and complete(folder):
         return folder, "up to date"
     try:
-        contents = {name: get(f"{api_url}/data/{name}", timeout) for name in FILES}
+        names = FILES + [n for n in OPTIONAL_FILES if n in info.get("files", {})]
+        contents = {name: get(f"{api_url}/data/{name}", timeout) for name in names}
     except (urllib.error.URLError, OSError) as e:
         return (folder if complete(folder) else None), f"download failed: {e}"
     # Write every file, then the version: a cut in the middle leaves the old

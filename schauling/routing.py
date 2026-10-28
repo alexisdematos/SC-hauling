@@ -26,6 +26,9 @@ class PlanStop:
     place: str
     actions: list = field(default_factory=list)
     seconds: int = 0  # travel time from the previous stop
+    via: list = None  # systems crossed on the way here ([Nyx, Pyro]), if any
+    arrival: float = None  # unix seconds, estimated
+    local: tuple = None  # (local time, phase, is day) on arrival; None in space
 
 
 @dataclass
@@ -33,6 +36,23 @@ class Plan:
     stops: list
     unplaced: list  # actions whose place we do not know
     total_seconds: int
+
+
+def _left(leg):
+    """SCU of a leg still to deliver ("Deliver 8/24": 16 left)."""
+    return max((leg.total or 0) - (leg.amount or 0), 0)
+
+
+def peak_load(plan):
+    """Most SCU aboard at once along the plan: what is already aboard, then at
+    each stop unload first, load next."""
+    load = sum(_left(a.leg) for s in plan.stops for a in s.actions if a.kind == "dropoff" and a.leg.picked)
+    peak = load
+    for stop in plan.stops:
+        load -= sum(_left(a.leg) for a in stop.actions if a.kind == "dropoff")
+        load += sum(_left(a.leg) for a in stop.actions if a.kind == "pickup")
+        peak = max(peak, load)
+    return peak
 
 
 def build_actions(tracker):

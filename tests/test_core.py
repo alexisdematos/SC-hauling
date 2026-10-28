@@ -10,7 +10,8 @@ from schauling.locations import location_code, place_for_code
 from schauling.picker import matches
 from schauling.places import START_RADIUS_KM, Place, Places, parse_coordinates
 from schauling.ships import boarded_ship, piloted_class, ship_for_class
-from schauling.routing import Action, build_actions, plan
+from schauling.routing import Action, build_actions, peak_load, plan
+from schauling.titles import TitleTemplates
 from schauling.tracker import EXACT, GUESS, Tracker, cargo_tokens, courier_hint
 
 FIXTURE = Path(__file__).parent / "fixtures" / "game_sample.log"
@@ -103,6 +104,17 @@ class LogParserTest(unittest.TestCase):
                          ("Constellation Mk V Cntr. Gold Box", 0, "RSI Event Platform"))
         self.assertEqual(parse_pickup("Collect Constellation Mk V Cntr. Gold Box From RSI Event Platform"),
                          {"item": "Constellation Mk V Cntr. Gold Box", "origin": "RSI Event Platform"})
+        # Other delivery missions (global.ini): packages, boxes, "go to".
+        self.assertEqual(parse_pickup("Pick up Package #4821 from Area18."),
+                         {"item": "Package #4821", "origin": "Area18"})
+        self.assertEqual(parse_pickup("Pick Up Medical Supplies From Seraphim Station"),
+                         {"item": "Medical Supplies", "origin": "Seraphim Station"})
+        self.assertEqual(parse_pickup("Pick up the Medical Supplies from Lorville."),
+                         {"item": "Medical Supplies", "origin": "Lorville"})
+        self.assertEqual(parse_pickup("Pick Up from Bountiful Harvest"), {"item": None, "origin": "Bountiful Harvest"})
+        self.assertEqual(parse_pickup("Go to Shubin SAL-5 to pick up cargo."), {"item": None, "origin": "Shubin SAL-5"})
+        self.assertIsNone(parse_pickup("Pick up the shipment."))
+        self.assertEqual(parse_delivery("Deliver Package #4821 to Area18.")["dest"], "Area18")
 
     def test_title_route(self):
         self.assertEqual(
@@ -113,11 +125,303 @@ class LogParserTest(unittest.TestCase):
         self.assertEqual(title_route("RSI Disc. Month: Important Supply Haul"), (None, None))
 
 
+class TitleTemplatesTest(unittest.TestCase):
+    TEMPLATES = TitleTemplates([
+        "Covalex_HaulCargo_SingleToMulti_title=~mission(ReputationRank) Rank - ~mission(CargoGradeToken) Cargo Haul"
+        " - ~mission(Location|Address) > ~mission(Destination|Address), ~mission(Destination1|Address),"
+        " ~mission(Destination2|Address) <EM4>[BP?]</EM4>",
+        "Foxwell_HaulCargo_MultiToSingle_title_01=Red Level Contract: Clear PAFs - ~mission(Location1|Address),"
+        " ~mission(Location2|Address), ~mission(Location|Address) > ~mission(Destination|Address) <EM4>[BP]</EM4>",
+        "Covalex_HaulCargo_LinearChain_title=~mission(ReputationRank) Rank  - ~mission(CargoGradeToken) Cargo Haul",
+        "HaulCargo_obj_short_01=Collect Shipment",
+    ])
+
+    def test_route(self):
+        self.assertEqual(
+            self.TEMPLATES.route("Senior Rank - Medium Cargo Haul - Levski > Area18, Orison, Lorville "
+                                 "<EM4>[BP?]</EM4>: "),
+            (["Levski"], ["Area18", "Orison", "Lorville"]))
+        # Fewer drop-offs than the template has: the empty ones go.
+        self.assertEqual(self.TEMPLATES.route("Senior Rank - Medium Cargo Haul - Levski > Area18, ,  [BP?]"),
+                         (["Levski"], ["Area18"]))
+        # Places in Location, Location1… order, whatever the title order.
+        self.assertEqual(self.TEMPLATES.route("Red Level Contract: Clear PAFs - Orbituary, Checkmate, Ruin Station"
+                                              " > Megumi Refueling [BP]"),
+                         (["Ruin Station", "Orbituary", "Checkmate"], ["Megumi Refueling"]))
+        self.assertIsNone(self.TEMPLATES.route("Senior Rank  - Medium Cargo Haul"))
+        self.assertIsNone(self.TEMPLATES.route("RSI Disc. Month: Important Supply Haul"))
+
+    def test_tracker_uses_templates(self):
+        t = Tracker(PLACES, titles=self.TEMPLATES)
+        code = "HaulCargo_SingleToMulti3_Planetary_Small_Souv"
+        t.feed(notification("m11", "", "Senior Rank - Medium Cargo Haul - Levski > Area18, Orison, Lorville [BP?]",
+                            "Contract Accepted"))
+        for phase in ("ab", "cd", "ef"):
+            t.feed(marker("m11", f"dropoff_{phase}_0", code))
+        [c] = t.active()
+        self.assertEqual({t.pickup_of(c, l).name for l in c.open_legs()}, {"Levski"})
+        self.assertEqual(t.dropoff_of(c, c.open_legs()[0]).name, "Area18 / Orison / Lorville")
+
+
+class ContractPageTest(unittest.TestCase):
+    # Windows OCR of a real contract page (overlay text below it included).
+    LINES = ['PRIMARY OBJECTIVES', 'O Deliver 0/24 SCU of Distilled Spirits to Grim HEX within', "Yela's asteroid belt.",
+             'O Pick up at Levski', 'O Deliver 0/12 SCU of Party Favors to Grim HEX within', "Yela's asteroid belt.",
+             'o Pick up at Seraphim Statlon', 'O Deliver 0/3 SCU of Audio-Visual Equipment to', 'Grim HEX',
+             'within Yela•s asteroid belt.', 'O Pick up at Levski', 'O Deliver 0/3 SCIJ of Souvenirs to ArealB on',
+             'ArcCorp.', 'O Pick up at Levski', 'Hauling • I contract(s) • 42 SCU • cargo',
+             'Levski', "—Grim HEX within Yela's asteroid belt : 24 SCU Distilled Spirits"]
+
+    def test_parse(self):
+        from schauling.ocr import parse_objectives
+        self.assertEqual(parse_objectives(self.LINES), [
+            {"item": "Distilled Spirits", "total": 24, "dest": "Grim HEX within Yela's asteroid belt", "origin": "Levski"},
+            {"item": "Party Favors", "total": 12, "dest": "Grim HEX within Yela's asteroid belt",
+             "origin": "Seraphim Statlon"},
+            {"item": "Audio-Visual Equipment", "total": 3, "dest": "Grim HEX within Yela's asteroid belt",
+             "origin": "Levski"},
+            {"item": "Souvenirs", "total": 3, "dest": "ArealB on ArcCorp", "origin": "Levski"},
+        ])
+        self.assertEqual(parse_objectives(["Collect 2 Medical Supplies from Port Tressler"]), [])
+        # In game the blue destination may come as a line of its own, elsewhere.
+        self.assertEqual(parse_objectives(["O Deliver 0/8 SCU of Gold to", "o Pick up at Orbituary"]),
+                         [{"item": "Gold", "total": 8, "dest": None, "origin": "Orbituary"}])
+        # Full stop missed by the OCR on a one-line delivery: its pickup line says it is whole.
+        self.assertEqual(parse_objectives(["O Deliver 0/12 SCU of Party Favors to Area18 on ArcCorp",
+                                           "O Pick up at Levski"]),
+                         [{"item": "Party Favors", "total": 12, "dest": "Area18 on ArcCorp", "origin": "Levski"}])
+
+    def test_apply_to_contract(self):
+        from schauling.ocr import parse_objectives
+        t = Tracker(PLACES)
+        code = "HaulCargo_Multi2ToSingle_Interstellar_Medium_Souv"
+        # Cargo names from the log for the first two legs only (by name), none for the third.
+        t.feed(notification("m12", "dropoff_ab_1", "0/12 Party Favors > Area18"))
+        t.feed(notification("m12", "dropoff_ab_0", "0/24 Distilled Spirits > Area18"))
+        t.feed(marker("m12", "dropoff_ab_2", code))
+        n = t.apply_page("m12", parse_objectives(self.LINES))
+        self.assertEqual(n, 4)  # the fourth cargo, unknown to the log, comes from the page
+        [c] = t.active()
+        got = {l.item: t.pickup_of(c, l) for l in c.open_legs()}
+        self.assertEqual({k: (s.name, s.confidence) for k, s in got.items()}, {
+            "Distilled Spirits": ("Levski", EXACT), "Party Favors": ("Seraphim Station", EXACT),
+            "Audio-Visual Equipment": ("Levski", EXACT), "Souvenirs": ("Levski", EXACT)})
+        self.assertEqual(t.apply_page("nope", []), 0)
+
+    def test_untracked_contract_gets_every_cargo(self):
+        # Accepted untracked: the log has the _0 markers only; code and page list 5 cargos.
+        t = Tracker(PLACES, items={})
+        code = "HaulCargo_AToB_Interstellar_Bulk_DistSp_Dia_FresFoo_Gol_Aphor"
+        t.feed(marker("m13", "pickup_ba_0", code))
+        t.feed(marker("m13", "dropoff_ba_0", code))
+        [c] = t.active()
+        self.assertEqual(len(c.open_legs()), 5)  # from the code, names guessed
+        page = [{"item": i, "total": n, "dest": "Teasa Spaceport in Lorville", "origin": "Megumi Refueling"}
+                for i, n in [("Distilled Spirits", 32), ("Diamond", 8), ("Fresh Food", 16), ("Gold", 8), ("Aphorite", 2)]]
+        self.assertEqual(t.apply_page("m13", page), 5)
+        legs = c.open_legs()
+        self.assertEqual([(l.item, l.total) for l in legs],
+                         [("Distilled Spirits", 32), ("Diamond", 8), ("Fresh Food", 16), ("Gold", 8), ("Aphorite", 2)])
+        self.assertEqual({t.pickup_of(c, l).name for l in legs}, {"Megumi Refueling"})
+        self.assertEqual({t.dropoff_of(c, l).name for l in legs}, {"Lorville"})
+        # A Multi2ToSingle code names one cargo of four: the page adds the legs the log missed.
+        code = "HaulCargo_Multi2ToSingle_Interstellar_Medium_Souv"
+        for oid in ("pickup_cd_0", "pickup_cd_1", "dropoff_cd_0"):
+            t.feed(marker("m14", oid, code))
+        t.apply_page("m14", page[:3])
+        self.assertEqual(sorted(l.item for l in t.contracts["m14"].legs.values()),
+                         ["Diamond", "Distilled Spirits", "Fresh Food"])
+
+    def test_match_page(self):
+        t = Tracker(PLACES, items={})
+        t.feed(marker("m15", "dropoff_ba_0", "HaulCargo_AToB_Interstellar_Bulk_DistSp_Dia_FresFoo_Gol_Aphor"))
+        t.feed(notification("m16", "dropoff_cd_0", "0/12 Party Favors > Area18"))
+        t.items.update({"Dia": "Diamond"})
+        page = [{"item": "Diamond", "total": 8, "dest": "Teasa Spaceport in Lorville", "origin": "Orbituary"}]
+        self.assertEqual(t.match_page(page), "m15")
+        page = [{"item": "Party Favors", "total": 12, "dest": "Area18", "origin": "Levski"}]
+        self.assertEqual(t.match_page(page), "m16")
+        self.assertIsNone(t.match_page([{"item": "Iron", "total": 1, "dest": "Lorville", "origin": None}]))
+        self.assertIsNone(t.match_page([]))
+
+    def test_match_page_by_destination(self):
+        # Two Ling contracts, same four cargos: tracked to Area18 (names in the log),
+        # untracked Multi2ToSingle to Orison (no names). The Orison page is the second's.
+        t = Tracker(PLACES, items={})
+        for n, item in enumerate(["Distilled Spirits", "Party Favors", "Audio-Visual Equipment", "Souvenirs"]):
+            t.feed(notification("m20", f"dropoff_ab_{n}", f"0/3 {item} > Area18"))
+        t.feed(notification("m21", "", "Ling Family - Small Scale - Levski > Orison", "Contract Accepted"))
+        for oid in ("pickup_cd_0", "pickup_cd_1", "dropoff_cd_0"):
+            t.feed(marker("m21", oid, "HaulCargo_Multi2ToSingle_Interstellar_Medium_Souv"))
+        page = [{"item": i, "total": 3, "dest": "August Dunlow Spaceport in Orison", "origin": o}
+                for i, o in [("Distilled Spirits", "Levski"), ("Party Favors", "Port Tressler"),
+                             ("Audio-Visual Equipment", None), ("Souvenirs", "Port Tressler")]]
+        self.assertEqual(t.match_page(page), "m21")
+        self.assertLess(t.page_fit("m20", page), 0.6)
+        self.assertEqual(t.pages_for("m21", [page]), [page])
+
+    def test_pages_of_another_contract_are_dropped(self):
+        # Gaslight accepted untracked, then the player clicked on to a Ling contract.
+        t = Tracker(PLACES, items={})
+        t.feed(marker("m17", "dropoff_ba_0", "HaulCargo_AToB_Interstellar_Bulk_DistSp_Dia_FresFoo_Gol_Aphor"))
+        gaslight = [{"item": i, "total": n, "dest": "Teasa Spaceport in Lorville", "origin": "Gaslight"}
+                    for i, n in [("Distilled Spirits", 32), ("Diamond", 8), ("Fresh Food", 16), ("Gold", 8),
+                                 ("Aphorite", 2)]]
+        ling = [{"item": i, "total": n, "dest": "Teasa Spaceport in Lorville", "origin": o}
+                for i, n, o in [("Distilled Spirits", 24, "Levski"), ("Party Favors", 12, "Seraphim Station"),
+                                ("Audio-Visual Equipment", 3, "Seraphim Station"), ("Souvenirs", 3, "Seraphim Station")]]
+        self.assertEqual(t.pages_for("m17", [gaslight[:4], ling, []]), [gaslight[:4]])
+        # Untracked Multi2ToSingle: the code names one cargo of four, keep the first page only.
+        code = "HaulCargo_Multi2ToSingle_Interstellar_Medium_Souv"
+        for n in range(4):
+            t.feed(marker("m18", f"dropoff_cd_{n}", code))
+        self.assertEqual(t.pages_for("m18", [[], ling, gaslight]), [ling])
+
+    def test_page_still_drawing(self):
+        from schauling.ocr import merge_pages, parse_objectives
+        # First screenshot while the page draws: a cut line, the next text glued to it.
+        drawing = ["PRIMARY OBJECTIVES", "O Deliver 0/24 SCU of Distilled Spirits to Area18 on", "ArcCorp.",
+                   "O Pick up at Levski", "O Deliver 0/3 SCU of Audio-Visual Equipm",
+                   "x Ä 194,500 N/A Ling Family Hauling Guess the folks at Area18 on ArcCorp are planning",
+                   "a party and need help acquiring everything in a timely manner. You'll need to make",
+                   "multiple pick-ups for this one."]
+        first = parse_objectives(drawing)
+        self.assertEqual([e["item"] for e in first], ["Distilled Spirits"])
+        done = [{"item": "Audio-Visual Equipment", "total": 3, "dest": "Area18 on ArcCorp", "origin": "Levski"}]
+        cut = [{"item": "Audio-Visual Equipm", "total": 3, "dest": "Area18", "origin": None}]
+        self.assertEqual([e["item"] for e in merge_pages([cut + first, done])],
+                         ["Distilled Spirits", "Audio-Visual Equipment"])
+        # The code lists one cargo per leg: no leg for a line it does not know.
+        t = Tracker(PLACES, items={})
+        code = "HaulCargo_AToB_Interstellar_Medium_DistSpri_PartyFav_ElecEq_Souv"
+        t.feed(marker("m19", "dropoff_ab_0", code))
+        for n, (item, scu) in enumerate([("Distilled Spirits", 24), ("Party Favors", 12),
+                                         ("Audio-Visual Equipment", 3), ("Souvenirs", 3)]):
+            t.feed(notification("m19", f"dropoff_ab_{n}", f"0/{scu} {item} > Area18"))
+        t.apply_page("m19", done + [{"item": "Junk x 194,500", "total": 3, "dest": "Area18", "origin": "Levski"}])
+        self.assertEqual(len(t.contracts["m19"].legs), 4)
+
+    def test_page_fits_code_abbreviations(self):
+        from schauling.tracker import _abbreviates
+        # The game drops letters: "Spri" for Spirits.
+        self.assertTrue(_abbreviates("DistSpri", "Distilled Spirits"))
+        self.assertTrue(_abbreviates("FresFoo", "Fresh Food"))
+        self.assertFalse(_abbreviates("Gol", "Diamond"))
+        # Untracked AToB: no names in the log, only the code; ElecEq is learnt (Audio-Visual Equipment).
+        t = Tracker(PLACES)
+        t.feed(marker("m23", "dropoff_ab_0", "HaulCargo_AToB_Interstellar_Medium_DistSpri_PartyFav_ElecEq_Souv"))
+        page = [{"item": i, "total": n, "dest": None, "origin": "Levski"}
+                for i, n in [("Distilled Spirits", 24), ("Party Favors", 12), ("Audio-Visual Equipment", 3),
+                             ("Souvenirs", 3)]]
+        self.assertEqual(t.page_fit("m23", page), 1.0)
+        self.assertEqual(t.match_page(page), "m23")
+
+    def test_merge_pages(self):
+        from schauling.ocr import merge_pages
+        a = {"item": "Gold", "total": 8, "dest": "X", "origin": None}
+        b = {"item": "Gold", "total": 8, "dest": "X", "origin": "Orbituary"}
+        c = {"item": "Diamond", "total": 8, "dest": "X", "origin": "Orbituary"}
+        d = {"item": "Fresh Food", "total": 16, "dest": "X", "origin": "Orbituary"}
+        merged = merge_pages([[b], [a, c], []])
+        self.assertEqual([(e["item"], e["origin"]) for e in merged], [("Gold", "Orbituary"), ("Diamond", "Orbituary")])
+        self.assertEqual(len(merge_pages([[a, c], [d]])), 3)
+        self.assertEqual(merge_pages([]), [])
+
+
+class PatchCheckTest(unittest.TestCase):
+    def test_log_lines_still_read(self):
+        from schauling import patchcheck
+        lines = fixture_lines()
+        counts, _ = patchcheck.scan(lines)
+        self.assertGreater(counts["objective marker"][0], 0)
+        self.assertEqual(patchcheck.log_warnings(counts), [])
+        # A patch renames a field of the marker lines: they show, but we read none.
+        changed = [l.replace("objectiveId [", "objectiveGuid [") for l in lines]
+        self.assertTrue(any("objective marker lines no longer read" in w
+                            for w in patchcheck.log_warnings(patchcheck.scan(changed)[0])))
+        # Or the markers go away while contracts are accepted.
+        gone = [l for l in lines if "CreateMarker" not in l]
+        self.assertTrue(any("no objective marker" in w for w in patchcheck.log_warnings(patchcheck.scan(gone)[0])))
+
+    def test_global_ini_and_once_per_version(self):
+        from schauling import patchcheck
+        with tempfile.TemporaryDirectory() as d:
+            ini = Path(d) / "global.ini"
+            ini.write_text("Covalex_HaulCargo_AToB_title=Haul - ~mission(Location|Address) > ~mission(Destination|Address)\n"
+                           "HaulCargo_obj_itemspecifics_01=~mission(item)\n", encoding="utf-8")
+            self.assertEqual(patchcheck.ini_warnings(ini), [])
+            ini.write_text("Covalex_HaulCargo_AToB_title=Haul - ~mission(CargoGradeToken)\n", encoding="utf-8")
+            self.assertEqual(len(patchcheck.ini_warnings(ini)), 2)
+        cfg = {}
+        self.assertEqual(patchcheck.new_warnings(cfg, "4.10", ["a"]), ["a"])
+        self.assertEqual(patchcheck.new_warnings(cfg, "4.10", ["a"]), [])  # shown once
+        self.assertEqual(patchcheck.new_warnings(cfg, "4.11", ["a"]), ["a"])  # again after the next patch
+
+
+class LiveServerTest(unittest.TestCase):
+    def test_state_and_cors(self):
+        import socket
+        import urllib.request
+        from schauling import liveserver
+        from schauling.routing import Plan, PlanStop
+        from types import SimpleNamespace as Leg
+        leg = Leg(total=12, amount=0, cargo="~Party Favors")
+        stop = PlanStop("Port Tressler", [Action("pickup", "Port Tressler", leg, "c")], 120, ["Nyx", "Pyro"],
+                        1793270400.0)
+        state = liveserver.build_state("Drake Caterpillar", "Lorville", "log", Plan([stop], [], 120), 1793270000.0)
+        self.assertEqual(state["route"], [{"place": "Port Tressler", "arrival": "2026-10-29T10:40:00Z", "jump": "Nyx → Pyro",
+                                           "actions": [{"type": "load", "scu": 12, "cargo": "Party Favors"}]}])
+        with socket.socket() as s:  # a free port
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        server = liveserver.LiveServer(lambda: state)
+        server.start(port)
+        try:
+            def get(origin, method="GET"):
+                req = urllib.request.Request(f"http://127.0.0.1:{port}/state", method=method,
+                                             headers={"Origin": origin} if origin else {})
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    return r.headers, r.read()
+            headers, body = get(liveserver.SITE)
+            self.assertEqual(json.loads(body)["location"], "Lorville")
+            self.assertEqual(headers["Access-Control-Allow-Origin"], liveserver.SITE)
+            self.assertEqual(headers["Access-Control-Allow-Private-Network"], "true")
+            self.assertEqual(get("http://localhost:8080")[0]["Access-Control-Allow-Origin"], "http://localhost:8080")
+            self.assertIsNone(get("https://evil.example")[0]["Access-Control-Allow-Origin"])
+            self.assertIn("GET", get(liveserver.SITE, "OPTIONS")[0]["Access-Control-Allow-Methods"])
+            # DNS rebinding: a request naming another host gets nothing.
+            import http.client
+            for host, status in ((f"evil.example:{port}", 403), (f"127.0.0.1:{port}", 200),
+                                 (f"localhost:{port}", 200), (None, 403)):
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                conn.putrequest("GET", "/state", skip_host=True)
+                if host:
+                    conn.putheader("Host", host)
+                conn.putheader("Origin", liveserver.SITE)
+                conn.endheaders()
+                r = conn.getresponse()
+                self.assertEqual(r.status, status, host)
+                if status == 403:
+                    self.assertIsNone(r.getheader("Access-Control-Allow-Origin"))
+                    self.assertEqual(r.read(), b"")
+                conn.close()
+            # A second server on the same port: an error to show, not a crash.
+            with self.assertRaises(OSError):
+                liveserver.LiveServer(lambda: state).start(port)
+        finally:
+            server.stop()
+        self.assertEqual(liveserver.map_url("Port Tressler", 47823),
+                         "https://ofs-versetime.netlify.app/?live=47823#Port_Tressler")
+        self.assertEqual(liveserver.map_url("Lorville"), "https://ofs-versetime.netlify.app/#Lorville")
+
+
 class PlacesTest(unittest.TestCase):
     def test_resolve(self):
         self.assertEqual(PLACES.resolve("Teasa Spaceport in Lorville").name, "Lorville")
         self.assertEqual(PLACES.resolve("August Dunlow Spaceport").name, "Orison")
         self.assertEqual(PLACES.resolve("Area18 on ArcCorp").name, "Area18")
+        grim = Places([Place("Grim HEX", "Space station", "Yela", "Stanton", 0, 0, 0)], {})
+        self.assertEqual(grim.resolve("Grim HEX within Yela's asteroid belt").name, "Grim HEX")
         self.assertEqual(PLACES.resolve("Megumi Refueling at the L5 Lagrange of Pyro VI").name, "Megumi Refueling")
         self.assertIsNone(PLACES.resolve("Stanton System"))
         self.assertIsNone(PLACES.resolve(None))
@@ -223,6 +527,37 @@ class TrackerTest(unittest.TestCase):
         stops = [t.pickup_of(c, l) for l in c.open_legs()]
         self.assertEqual([(s.name, s.confidence) for s in stops],
                          [("Levski", EXACT), ("Orison", EXACT), ("Orison", GUESS), ("Orison", GUESS)])
+
+    def test_single_to_multi(self):
+        # One pickup for every cargo; the title lists the drop-offs.
+        t = Tracker(PLACES)
+        code = "HaulCargo_SingleToMulti_Planetary_Small_Souv_PartyFav"
+        t.feed(notification("m9", "", "Covalex - Levski > Area18, Orison", "Contract Accepted"))
+        t.feed(marker("m9", "pickup_ab_0", code))
+        t.feed(marker("m9", "pickup_cd_0", code))
+        t.feed(notification("m9", "dropoff_ab_0", "Deliver 0/4 Souvenirs to Area18"))
+        t.feed(marker("m9", "dropoff_cd_0", code))
+        [c] = t.active()
+        legs = c.open_legs()
+        self.assertEqual([(t.pickup_of(c, l).name, t.pickup_of(c, l).confidence) for l in legs],
+                         [("Levski", EXACT), ("Levski", EXACT)])
+        self.assertEqual([(t.dropoff_of(c, l).name, t.dropoff_of(c, l).confidence) for l in legs],
+                         [("Area18", EXACT), ("Orison", GUESS)])
+
+    def test_region_link(self):
+        # Pyro direct haul: A to B for every cargo, and no cargo named "RegionLink".
+        t = Tracker(PLACES)
+        code = "RedWind_HaulCargo_CFP_RegionLink_Medium"
+        self.assertEqual(cargo_tokens(code), [])
+        t.feed(notification("m10", "", "Red Wind - Megumi Refueling > Stanton Gateway (Pyro)", "Contract Accepted"))
+        t.feed(marker("m10", "pickup_ab_0", code))
+        t.feed(marker("m10", "pickup_cd_0", code))
+        t.feed(notification("m10", "dropoff_ab_0", "Deliver 0/8 Scrap to Stanton Gateway (Pyro)"))
+        t.feed(marker("m10", "dropoff_cd_0", code))
+        [c] = t.active()
+        for leg in c.open_legs():
+            self.assertEqual(t.pickup_of(c, leg).name, "Megumi Refueling")
+            self.assertEqual(t.dropoff_of(c, leg).name, "Stanton Gateway (Pyro)")
 
     def test_end_mission_abandon(self):
         t = self.replay([l for l in fixture_lines() if "40eaf018" in l] + [
@@ -351,15 +686,60 @@ class SessionTest(unittest.TestCase):
             self.assertTrue(s.ship_changed)
             self.assertEqual(s.last_ship, "RSI Zeus Mk II ES")
 
+    def test_pages_read_survive_a_restart(self):
+        from schauling.session import Session
+        data = Path(__file__).resolve().parent.parent.parent / "SC-map" / "data"
+        if not (data / "locations.csv").is_file():
+            self.skipTest("SC-map data not next to this project")
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "Game.log"
+            log.write_text(marker("m22", "dropoff_ab_0", "HaulCargo_Multi2ToSingle_Interstellar_Medium_Souv") + "\n"
+                           + marker("m22", "pickup_ab_1", "HaulCargo_Multi2ToSingle_Interstellar_Medium_Souv") + "\n",
+                           encoding="utf-8")
+            page = [{"item": i, "total": 3, "dest": "Area18", "origin": o}
+                    for i, o in [("Distilled Spirits", "Levski"), ("Party Favors", "Port Tressler"),
+                                 ("Souvenirs", "Port Tressler")]]
+            pages, manual = {"gone": page}, {}
+            s = Session(log, data, "RSI Zeus Mk II ES", manual=manual, pages=pages)
+            s.keep_page("m22", page)
+            # Overlay restarted: the log alone gives two legs, the kept page three.
+            s = Session(log, data, "RSI Zeus Mk II ES", manual=manual, pages=pages)
+            self.assertEqual(sorted(l.item for l in s.tracker.contracts["m22"].legs.values()),
+                             ["Distilled Spirits", "Party Favors", "Souvenirs"])
+            self.assertNotIn("gone", pages)  # contracts no longer in the log are forgotten
+
+    def test_quantum_route_gives_start(self):
+        from schauling.session import Session
+        data = Path(__file__).resolve().parent.parent.parent / "SC-map" / "data"
+        if not (data / "locations.csv").is_file():
+            self.skipTest("SC-map data not next to this project")
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "Game.log"
+            log.write_text("", encoding="utf-8")
+            s = Session(log, data, "RSI Zeus Mk II ES")
+            with open(log, "a", encoding="utf-8") as f:
+                f.write("<2026-10-28T16:31:50.102Z> [Notice] <Calculate Route> [ItemNavigation][CL][11712] | NOT AUTH"
+                        " | RSI_Zeus_ES_905331888284[905331888284]|CSCItemNavigation::CalculateRoute|Projected Start"
+                        " Location is Levski for route to destination rs_ext_nyx-castra_jp1 [Team_CGP4][QuantumTravel]\n")
+            s.update()
+            self.assertTrue(s.place_changed)
+            self.assertEqual(s.here, "Levski")
+            # A gateway name alone: the system comes from the destination code.
+            with open(log, "a", encoding="utf-8") as f:
+                f.write("<t> [Notice] <Calculate Route> | X_1[1]|CSCItemNavigation::CalculateRoute|Projected Start"
+                        " Location is Stanton Gateway for route to destination rs_ext_nyx_levski [QuantumTravel]\n")
+            s.update()
+            self.assertEqual(s.here, "Stanton Gateway (Nyx)")
+
 
 class DataSyncTest(unittest.TestCase):
-    def fake_api(self, version, calls):
-        files = {name: f"{name} v{version}".encode() for name in datasync.FILES}
+    def fake_api(self, version, calls, listed=()):
+        files = {name: f"{name} v{version}".encode() for name in datasync.FILES + list(listed)}
 
         def get(url, timeout):
             calls.append(url.rsplit("/", 1)[-1])
             if url.endswith("/data/version"):
-                return json.dumps({"version": version}).encode()
+                return json.dumps({"version": version, "files": {n: {} for n in files}}).encode()
             return files[url.rsplit("/", 1)[-1]]
 
         return get
@@ -377,6 +757,14 @@ class DataSyncTest(unittest.TestCase):
             _, status = datasync.sync(d, get=self.fake_api("v2", calls))
             self.assertEqual(status, "updated to v2")
             self.assertEqual(sorted(calls), sorted(["version"] + datasync.FILES))
+
+    def test_optional_file_when_listed(self):
+        with tempfile.TemporaryDirectory() as d:
+            calls = []
+            datasync.sync(d, get=self.fake_api("v1", calls))
+            self.assertNotIn("ships.json", calls)  # an API without it
+            datasync.sync(d, get=self.fake_api("v2", calls, listed=["ships.json"]))
+            self.assertEqual((Path(d) / "ships.json").read_text(), "ships.json vv2")
 
     def test_offline_keeps_the_last_copy(self):
         def down(url, timeout):
@@ -502,6 +890,44 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual(order, ["C", "A", "B"])
         self.assertEqual(total, 100 + 200 + 100)
 
+    def test_peak_load(self):
+        from types import SimpleNamespace as Leg
+        from schauling.report import route_lines
+        from schauling.routing import Plan, PlanStop
+        aboard = Leg(total=10, amount=4, picked=True, cargo="Gold")  # 6 SCU left to deliver
+        a = Leg(total=24, amount=0, picked=False, cargo="Souvenirs")
+        b = Leg(total=12, amount=0, picked=False, cargo="Party Favors")
+        stops = [PlanStop("A", [Action("pickup", "A", a, "c")]),
+                 PlanStop("B", [Action("dropoff", "B", aboard, "c"), Action("pickup", "B", b, "c")]),
+                 PlanStop("C", [Action("dropoff", "C", a, "c"), Action("dropoff", "C", b, "c")])]
+        p = Plan(stops, [], 0)
+        self.assertEqual(peak_load(p), 6 + 24 - 6 + 12)
+        self.assertIn("Max aboard: 36 / 46 SCU", route_lines(p, 46))
+        self.assertIn("Too much: up to 36 SCU aboard, the ship holds 32", route_lines(p, 32))
+        self.assertFalse(any("aboard" in line for line in route_lines(p)))
+        # Local time on arrival, ☾ at night; nothing for a place in space.
+        stops[1].seconds, stops[1].local = 90, ("21:31", "Night", False)
+        stops[2].seconds, stops[2].local = 60, ("06:14", "Morning", True)
+        lines = route_lines(p)
+        self.assertIn("2. B  (+1m30)  · 21:31 night ☾", lines)
+        self.assertIn("3. C  (+1m00)  · 06:14 morning", lines)
+
+    def test_local_times(self):
+        from schauling.api import local_times
+        answers = {"Lorville": {"localTime": "16:17", "phaseText": "Afternoon", "isDay": True},
+                   "Megumi Refueling": {"localTime": None, "reason": "In space: no local day cycle."}}
+        asked = []
+
+        def get(url):
+            asked.append(url)
+            if "Area18" in url:
+                raise OSError("down")
+            return answers[next(n for n in answers if n.replace(" ", "+") in url)]
+
+        got = local_times([("Lorville", 1000.7), ("Megumi Refueling", 2000), ("Area18", 3000)], get=get)
+        self.assertEqual(got, [("16:17", "Afternoon", True), None, None])
+        self.assertTrue(any("at=1000" in u for u in asked))
+
     def test_many_actions_few_places_stays_exact(self):
         # Greedy would go to the nearest first (B) and pay for it later.
         cost = {frozenset("AB"): 1000, frozenset("AR"): 1050, frozenset("BR"): 1000,
@@ -552,6 +978,10 @@ class TravelTimesTest(unittest.TestCase):
                           if p.name not in ("Stanton Gateway (Nyx)", "Nyx Gateway (Stanton)")], BODIES)
         tt = TravelTimes(no_link, fetch=lambda a, b: (100, None))
         self.assertEqual(tt.seconds("Levski", "Lorville"), 100 + JUMP_SECONDS + 100 + JUMP_SECONDS + 100)
+        self.assertEqual(tt.systems_between("Levski", "Lorville"), ["Nyx", "Pyro", "Stanton"])
+        self.assertEqual(TravelTimes(PLACES, fetch=lambda a, b: (100, None)).systems_between("Levski", "Lorville"),
+                         ["Nyx", "Stanton"])
+        self.assertIsNone(tt.systems_between("Lorville", "Area18"))
 
     def test_failures_not_cached_on_disk(self):
         with tempfile.TemporaryDirectory() as d:

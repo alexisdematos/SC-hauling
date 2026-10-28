@@ -7,6 +7,7 @@ under a mission marker: marker positions are in metres, relative to the
 planet or moon they are on, the same frame as SC-map (in km).
 """
 import csv
+import difflib
 import math
 import re
 from dataclasses import dataclass
@@ -99,8 +100,9 @@ class Places:
             return gateway
         candidates = [text]
         # "Teasa Spaceport in Lorville", "Area18 on ArcCorp",
-        # "Orbituary above Pyro III", "Megumi Refueling at the L5 Lagrange of Pyro VI"
-        m = re.match(r"(?i)^(.+?) (?:in|on|above|at the|at) (.+)$", text)
+        # "Orbituary above Pyro III", "Megumi Refueling at the L5 Lagrange of Pyro VI",
+        # "Grim HEX within Yela's asteroid belt"
+        m = re.match(r"(?i)^(.+?) (?:in|on|above|at the|at|within|near|inside|orbiting|around) (.+)$", text)
         if m:
             candidates += [m.group(1), m.group(2)]
         for c in candidates:
@@ -111,6 +113,21 @@ class Places:
         k = _key(text)
         hits = [p for key, p in self._by_key.items() if key.startswith(k)]
         return hits[0] if len(hits) == 1 else None
+
+    def closest(self, text):
+        """resolve(), forgiving OCR misreads ("Port Tresler", "HUR-LI")."""
+        place = self.resolve(text)
+        if place or not text:
+            return place
+        text = re.sub(r"(?i)\s+(?:in|on|above|at the|at|within|near|inside|orbiting|around)\s+.*$", "", text)
+        text = re.sub(r"(?<=-L)[Il|](?=\b)", "1", text)  # HUR-LI → HUR-L1
+        place = self.resolve(text)
+        if place:
+            return place
+        names = {_key(p.name): p for p in self.places}
+        names.update({_key(k): self.get(v) for k, v in SPACEPORTS.items() if self.get(v)})
+        hit = difflib.get_close_matches(_key(text), list(names), n=1, cutoff=0.8)
+        return names[hit[0]] if hit else None
 
     def _jump_point_gateway(self, text):
         """"Nyx - Pyro Jump Point" is the gateway station SC-map calls

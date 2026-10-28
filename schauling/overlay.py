@@ -11,7 +11,8 @@ import time
 import tkinter as tk
 from tkinter import messagebox
 
-from . import config, keys, windows
+from . import config, keys, liveserver, ocr, windows
+from .pagewatch import PageWatcher
 from .picker import pick
 from .places import START_RADIUS_KM, parse_coordinates
 from .report import cargo_lines, route_lines
@@ -21,11 +22,16 @@ FG = "#d8e6f0"
 DIM = "#6f8796"
 ACCENT = "#e8b54a"
 DONE = "#5fbf7a"
+WARN = "#e8664a"
 FONT = ("Segoe UI", 10)
 FONT_BOLD = ("Segoe UI", 10, "bold")
 
 POLL_MS = 1000
 FOCUS_MS = 250  # how often we check which window is in front
+CURSOR_MS = 50  # how often we check what the mouse is over (click-through)
+# Screenshots of the contract page from the menu (ms), once the menu has
+# closed. On accept, pagewatch takes them.
+MENU_SHOTS_MS = (400, 900)
 GAME_CHECK_MS = 5000  # how often we check that the game still runs
 QUIT_AFTER_S = 10  # quit this long after the game closed (a crash reporter may linger)
 AUTO = "\0auto"  # ship picker value: follow the last ship flown
@@ -40,11 +46,16 @@ class Overlay:
         self.cfg = cfg
         self.plan = None
         self._results = queue.Queue()
+        self._pages = queue.Queue()  # (mission, pages, error, final): one objectives list per screenshot
+        self._collected = {}  # mission: pages read so far, while its screenshots come
         self._planning = False
         self._replan = False
         self._last_location = float("-inf")  # monotonic time of the last position
         self._clipboard = None
         self.status = None  # one-line message under the header
+        self._start_source = "log"  # log, showlocation or manual: for the live map
+        self._live = {}  # the /state answer, rebuilt on this thread at each render
+        self.live = liveserver.LiveServer(lambda: self._live)
 
         self.root = tk.Tk()
         self.root.title("SC Hauling")
@@ -70,12 +81,20 @@ class Overlay:
         self.menu.add_command(label="Start location…", command=self.ask_start)
         self.menu.add_command(label="Ship…", command=self.ask_ship)
         self.menu.add_command(label="More / less transparent", command=self.cycle_alpha)
+        self.menu.add_command(label="Read the contract page now (open it in the mobiGlas first)",
+                              command=self.read_contract_page_now)
+        self.menu.add_command(label="Open the map (VerseTime)", command=self.open_map)
         self._auto_var = tk.BooleanVar(value=bool(cfg.get("auto_showlocation")))
         self.menu.add_checkbutton(label="Auto /showlocation when boarding a ship (sends keys to the game)",
                                   variable=self._auto_var, command=self.toggle_auto_showlocation)
         self._options = {}
+        self._live_var = tk.BooleanVar(value=bool(cfg.get("live_server", True)))
+        self.menu.add_checkbutton(label="Live position for the VerseTime map (local server)",
+                                  variable=self._live_var, command=self.toggle_live)
         for key, label in (("hide_outside_game", "Show only over the game"),
-                           ("close_with_game", "Close when the game closes")):
+                           ("close_with_game", "Close when the game closes"),
+                           ("read_contract_page", "Read the contract page on accept (screenshot + OCR)"),
+                           ("click_through", "Clicks go through, except on the texts")):
             var = self._options[key] = tk.BooleanVar(value=bool(cfg.get(key, True)))
             self.menu.add_checkbutton(label=label, variable=var,
                                       command=lambda k=key: self._toggle_option(k))
@@ -89,17 +108,56 @@ class Overlay:
         self.session.travel.ship = self._ship()
         if self.session.here:  # the current session's log knows where we are
             self.set_start(self.session.here, "log")
+        if cfg.get("live_server", True):
+            self.start_live()
         self.render()
         self.request_plan()
+        if windows.available():
+            # Its own thread: screenshots the instant a contract is accepted.
+            self.root.update_idletasks()
+            hwnd = int(self.root.wm_frame(), 16)
+            PageWatcher(self.session.source.path, lambda: hwnd,
+                        lambda: self.cfg.get("read_contract_page", True),
+                        lambda *read: self._pages.put(read)).start()
         self.root.after(POLL_MS, self.tick)
         self.watch_game()  # first check now, then every GAME_CHECK_MS
         self.root.after(FOCUS_MS, self.follow_focus)
+        if windows.available():
+            self._through, self._right = None, False
+            self.root.after(CURSOR_MS, self.follow_cursor)
 
     def _toggle_option(self, key):
         self.cfg[key] = bool(self._options[key].get())
         config.save(self.cfg)
 
     # --- game window -------------------------------------------------------
+
+    def follow_cursor(self):
+        """Left clicks go through the overlay to the game, except on its
+        texts (lines to click, the header to drag). Windows lets all clicks
+        through a part of a window or none, so the right button is watched
+        by hand: pressed anywhere over the overlay, it opens the menu (the
+        game gets that click too)."""
+        right = windows.right_button_down()
+        if self.cfg.get("click_through", True) and self._shown:
+            x, y = self.root.winfo_pointerxy()
+            if right and not self._right and self._through and self._over_overlay(x, y):
+                self.menu.tk_popup(x, y)
+            if not windows.mouse_button_down():
+                under = self.root.winfo_containing(x, y)
+                through = not (isinstance(under, tk.Label) and under.cget("text"))
+                if through != self._through:
+                    self._through = through
+                    windows.set_click_through(int(self.root.wm_frame(), 16), through)
+        elif not self.cfg.get("click_through", True) and self._through:
+            self._through = False
+            windows.set_click_through(int(self.root.wm_frame(), 16), False)
+        self._right = right
+        self.root.after(CURSOR_MS, self.follow_cursor)
+
+    def _over_overlay(self, x, y):
+        r = self.root
+        return r.winfo_rootx() <= x < r.winfo_rootx() + r.winfo_width() and             r.winfo_rooty() <= y < r.winfo_rooty() + r.winfo_height()
 
     def follow_focus(self):
         """Hide while another app is in front of a running game."""
@@ -111,6 +169,7 @@ class Overlay:
             if show:
                 self.root.deiconify()
                 self.root.attributes("-topmost", True)
+                self._through = None  # set it again on the shown window
             else:
                 self.root.withdraw()
         self.root.after(FOCUS_MS, self.follow_focus)
@@ -179,6 +238,7 @@ class Overlay:
         if name is None:
             return
         self.cfg["start"] = self.session.start = name or None
+        self._start_source = "manual"
         self.status = None
         config.save(self.cfg)
         self.request_plan()
@@ -230,6 +290,7 @@ class Overlay:
         self.request_plan()
 
     def quit(self):
+        self.live.stop()
         self._drag_end(None)
         self.root.destroy()
 
@@ -259,6 +320,9 @@ class Overlay:
             self._last_location = time.monotonic()
             self.set_start(self.session.here, "log")
             self.request_plan()
+        self.session.accepted.clear()  # read by the page watcher, the instant they come
+        while not self._pages.empty():
+            self._apply_pages(*self._pages.get())
         self.check_clipboard()
         while not self._results.empty():
             self.plan = self._results.get()
@@ -267,6 +331,93 @@ class Overlay:
                 self.request_plan()
             self.render()
         self.root.after(POLL_MS, self.tick)
+
+    def _apply_pages(self, mission, pages, error, final):
+        """Pages read by OCR, one per screenshot: from the page watcher as
+        each is read (final at the end), or all at once from the menu
+        (mission None). Applied as they come, so the overlay fills in fast."""
+        tracker = self.session.tracker
+        if not error and mission is None:  # read from the menu: which contract is it?
+            mission = tracker.match_page(ocr.merge_pages(pages))
+            error = None if mission else "no open contract with these cargos"
+        if mission is not None and not error:
+            pages = self._collected.setdefault(mission, []) + [p for p in pages if p]
+            self._collected[mission] = pages
+        # Only the screenshots of this contract's page: the player may have
+        # clicked on to another one meanwhile.
+        entries = ocr.merge_pages(tracker.pages_for(mission, pages)) if mission and not error and pages else []
+        if final:
+            self._collected.pop(mission, None)
+        if not entries:
+            if final:
+                error = error or ("the page on screen was another contract's" if pages else "no objectives on screen")
+                ocr.debug(f"apply to {str(mission)[:8]}: {error}")
+                self.status = f"Contract page not read: {error}"
+                self.render()
+            return
+        title = (tracker.contracts[mission].title or "")[:50] if mission in tracker.contracts else "?"
+        ocr.debug(f"apply to {mission[:8]} ({title}): {ocr.describe(entries)}")
+        n = self.session.keep_page(mission, entries)
+        self.status = f"Contract page read: {n} pickup(s) of {len(entries)} cargo(s)"
+        config.save(self.cfg)
+        self.request_plan()
+
+    def read_contract_page(self, mission, delays, from_menu=False):
+        """Screenshots of the game while a contract page is on screen, then
+        OCR on a worker thread. Right after "Contract Accepted" (the game in
+        front), or from the menu (the overlay in front: we capture the game
+        window under it; `mission` None, found from the cargos). The overlay
+        is left out of the screenshots (it may sit over the page)."""
+        shots = []
+
+        def shoot(n):
+            game = windows.game_window() if from_menu else None
+            if not (game if from_menu else windows.game_in_front()):
+                return finish()
+            path = ocr.temp_image(n)
+            hwnd = int(self.root.wm_frame(), 16)
+            windows.exclude_from_capture(hwnd, True)
+            try:
+                if ocr.capture_window(game, path) if from_menu else ocr.capture_foreground(path):
+                    shots.append(path)
+            finally:
+                windows.exclude_from_capture(hwnd, False)
+            if n + 1 < len(delays):
+                self.root.after(delays[n + 1] - delays[n], lambda: shoot(n + 1))
+            else:
+                finish()
+
+        def finish():
+            if not shots:
+                if from_menu:
+                    self.status = "Contract page not read: no game window"
+                    self.render()
+                return
+            self.status = "Reading the contract page…"
+            self.render()
+
+            def work():
+                try:
+                    read = ocr.read_images(shots)
+                    pages = [ocr.parse_objectives(lines) for lines in read]
+                    for n, (lines, page) in enumerate(zip(read, pages)):
+                        ocr.debug(f"menu: shot {n}: {ocr.describe(page)}  [raw: {ocr.raw_objectives(lines)}]")
+                    self._pages.put((mission, pages, None if any(pages) else "no objectives on screen", True))
+                except Exception as e:  # PowerShell missing, OCR error…
+                    self._pages.put((mission, [], str(e)[:80], True))
+                finally:
+                    for p in shots:
+                        p.unlink(missing_ok=True)
+
+            threading.Thread(target=work, daemon=True).start()
+
+        self.root.after(delays[0], lambda: shoot(0))
+
+    def read_contract_page_now(self):
+        """Menu: read the contract page open in the mobiGlas now."""
+        self.status = "Reading the contract page…"
+        self.render()
+        self.read_contract_page(None, MENU_SHOTS_MS, from_menu=True)
 
     def auto_showlocation(self):
         """Type /showlocation in the game chat when the player boards a ship
@@ -320,6 +471,7 @@ class Overlay:
 
     def set_start(self, name, source):
         """Start the route at `name`; `source` says where we got it."""
+        self._start_source = "showlocation" if source.startswith("/showlocation") else "log"
         self.cfg["start"] = self.session.start = name
         self.status = f"Start: {name} ({source})"
         config.save(self.cfg)
@@ -341,7 +493,33 @@ class Overlay:
 
         threading.Thread(target=work, daemon=True).start()
 
+    # --- live map ----------------------------------------------------------
+
+    def start_live(self):
+        port = int(self.cfg.get("live_port") or liveserver.DEFAULT_PORT)
+        try:
+            self.live.start(port)
+        except OSError as e:
+            self.status = f"Live map off: port {port} in use ({e.strerror or e})"
+
+    def toggle_live(self):
+        self.cfg["live_server"] = bool(self._live_var.get())
+        config.save(self.cfg)
+        if self.cfg["live_server"]:
+            self.start_live()
+        else:
+            self.live.stop()
+        self.render()
+
+    def open_map(self):
+        """VerseTime on where we are, following the live position when the
+        server runs."""
+        port = int(self.cfg.get("live_port") or liveserver.DEFAULT_PORT) if self.live.running else None
+        liveserver.open_map(self.cfg.get("start") or self.session.here, port)
+
     def render(self):
+        self._live = liveserver.build_state(self.session.travel.ship, self.cfg.get("start"), self._start_source,
+                                            self.plan, time.time())
         for w in self.body.winfo_children():
             w.destroy()
         contracts = self.session.tracker.active()
@@ -350,15 +528,17 @@ class Overlay:
         self.header.configure(text=f"Hauling · {len(contracts)} contract(s) · {scu} SCU · {view}")
         start = self.cfg.get("start")
         where = self.status or (f"Start: {start}" if start else "Start: /showlocation in game, or right-click")
-        status = f"{where}   ·   Ship: {self.session.travel.ship}"
+        capacity = self.session.capacity()
+        status = f"{where}   ·   Ship: {self.session.travel.ship}" + (f" ({capacity} SCU)" if capacity else "")
         tk.Label(self.body, text=status, bg=BG, fg=DIM, font=FONT, anchor="w").pack(anchor="w")
         if not contracts:
             tk.Label(self.body, text="No hauling contract in Game.log", bg=BG, fg=DIM, font=FONT).pack(anchor="w")
             return
         if view == "route":
-            lines = route_lines(self.plan) if self.plan else ["Planning…"]
+            lines = route_lines(self.plan, capacity) if self.plan else ["Planning…"]
             for text in lines:
-                color = ACCENT if text[:1].isdigit() else (DIM if text.startswith("Total") else FG)
+                color = ACCENT if text[:1].isdigit() else (DIM if text.startswith(("Total", "Max")) else FG)
+                color = WARN if text.startswith("Too much") else color
                 tk.Label(self.body, text=text, bg=BG, fg=color, font=FONT, anchor="w", justify="left").pack(anchor="w")
             return
         for text, done, contract, leg in cargo_lines(self.session.tracker):

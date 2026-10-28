@@ -130,14 +130,24 @@ _DELIVERY_FORMS = [
     re.compile(r"^Deliver (?P<item>.+?) [Tt]o (?P<dest>.+)$"),
 ]
 
-# Courier pickup: "Collect Constellation Mk V Cntr. Gold Box From RSI Event Platform"
-_PICKUP_FORM = re.compile(r"^Collect (?P<item>.+?) [Ff]rom (?P<origin>.+?)\.?$")
+_PICKUP_FORMS = [
+    # Courier: "Collect Constellation Mk V Cntr. Gold Box From RSI Event Platform"
+    # Package: "Pick up Package #4821 from Area18.", box run: "Pick Up from Bountiful Harvest"
+    re.compile(r"^(?:Collect|Pick [Uu]p)(?: the)?(?: (?P<item>.+?))? [Ff]rom (?P<origin>.+?)\.?$"),
+    # "Go to Shubin Mining Facility SAL-5 to pick up cargo."
+    re.compile(r"^Go [Tt]o (?P<origin>.+?) to (?:pick up|retrieve) .+$"),
+]
 
 
 def parse_pickup(text):
-    """{item, origin} for a pickup objective text, or None."""
-    m = _PICKUP_FORM.match(strip_tags(text))
-    return {k: v.strip(" .") for k, v in m.groupdict().items()} if m else None
+    """{item, origin} for a pickup objective text (item may be None), or None."""
+    text = strip_tags(text)
+    for form in _PICKUP_FORMS:
+        m = form.match(text)
+        if m:
+            d = m.groupdict()
+            return {"item": (d.get("item") or "").strip(" .") or None, "origin": d["origin"].strip(" .")}
+    return None
 
 
 def parse_delivery(text):
@@ -175,3 +185,9 @@ def title_origins(title):
     """Every pickup a title lists: "- Levski, Seraphim Station > Teasa Spaceport"."""
     origin, _ = title_route(title)
     return [o.strip() for o in origin.split(",") if o.strip()] if origin else []
+
+
+def title_destinations(title):
+    """Every drop-off a title lists: "- Levski > Teasa Spaceport, Seraphim Station" (SingleToMulti)."""
+    _, dest = title_route(title)
+    return [d.strip() for d in dest.split(",") if d.strip()] if dest else []
