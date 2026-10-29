@@ -27,9 +27,12 @@ def _iso(t):
     return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def build_state(ship, location, source, plan, now):
+def build_state(ship, location, source, plan, now, team=None, contracts=None, team_member=None):
     """The /state answer: ship, where we are, and the stops of the route
-    with their arrival time, jump and cargo (SC-map place names)."""
+    with their arrival time, jump and cargo (SC-map place names). team: the
+    code of the team we share with, so the map shows it too. contracts: see
+    team.contracts_state. team_member: our member id, so the map knows which
+    teammate we are (local only: team.TeamSharer leaves it out of the PUT)."""
     route = []
     for stop in plan.stops if plan else []:
         route.append({
@@ -41,7 +44,8 @@ def build_state(ship, location, source, plan, now):
                          "cargo": (a.leg.cargo or "").lstrip("~") or None} for a in stop.actions],
         })
     return {"version": 1, "updatedAt": _iso(now), "ship": ship, "location": location,
-            "locationSource": source if location else None, "route": route}
+            "locationSource": source if location else None, "route": route, "team": team,
+            "contracts": contracts or [], "teamMember": team_member if team else None}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -131,12 +135,16 @@ class LiveServer:
             self._server = None
 
 
-def map_url(place, port=None):
-    """The VerseTime map on a place; with the live position when the server runs."""
+def map_url(place, port=None, team=None):
+    """The VerseTime map on a place, or on the team; with the live position
+    when the server runs."""
     query = f"?live={port}" if port else ""
-    anchor = "#" + urllib.parse.quote(place.replace(" ", "_")) if place else ""
+    if team:
+        anchor = f"#team={team}"
+    else:
+        anchor = "#" + urllib.parse.quote(place.replace(" ", "_")) if place else ""
     return f"{SITE}/{query}{anchor}"
 
 
-def open_map(place, port=None):
-    webbrowser.open(map_url(place, port))
+def open_map(place, port=None, team=None):
+    webbrowser.open(map_url(place, port, team))

@@ -9,9 +9,9 @@ import queue
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 
-from . import config, keys, liveserver, ocr, windows
+from . import config, keys, liveserver, ocr, team, windows
 from .pagewatch import PageWatcher
 from .picker import pick
 from .places import START_RADIUS_KM, parse_coordinates
@@ -56,6 +56,13 @@ class Overlay:
         self._start_source = "log"  # log, showlocation or manual: for the live map
         self._live = {}  # the /state answer, rebuilt on this thread at each render
         self.live = liveserver.LiveServer(lambda: self._live)
+        self.team = team.TeamSharer(team.TeamApi(cfg.get("team_api") or team.API_URL))
+        self._team_error = None  # the error on the status line, to redraw when it changes
+        self._calls = queue.Queue()  # functions from other threads, run on this one
+        self._members = None  # the others in the team, last read (Team view); None before the first read
+        self._members_error = None
+        self._reading_team = False
+        self._open_members = set()  # member ids whose contracts are shown
 
         self.root = tk.Tk()
         self.root.title("SC Hauling")
@@ -77,13 +84,20 @@ class Overlay:
             w.bind("<Button-3>", self._menu)
 
         self.menu = tk.Menu(self.root, tearoff=0)
-        self.menu.add_command(label="Cargo / Route", command=self.toggle_view)
+        self.menu.add_command(label="Cargo / Route / Team", command=self.toggle_view)
         self.menu.add_command(label="Start location…", command=self.ask_start)
         self.menu.add_command(label="Ship…", command=self.ask_ship)
         self.menu.add_command(label="More / less transparent", command=self.cycle_alpha)
         self.menu.add_command(label="Read the contract page now (open it in the mobiGlas first)",
                               command=self.read_contract_page_now)
         self.menu.add_command(label="Open the map (VerseTime)", command=self.open_map)
+        self.team_menu = tk.Menu(self.menu, tearoff=0, postcommand=self._team_menu_state)
+        self.team_menu.add_command(label="Create a team", command=self.create_team)
+        self.team_menu.add_command(label="Join a team… (code or invite link)", command=self.join_team)
+        self.team_menu.add_command(label="Pseudo…", command=self.ask_team_name)
+        self.team_menu.add_command(label="Copy the invite link", command=self.copy_invite)
+        self.team_menu.add_command(label="Leave the team", command=self.leave_team)
+        self.menu.add_cascade(label="Team (shares position and route on the Internet)", menu=self.team_menu)
         self._auto_var = tk.BooleanVar(value=bool(cfg.get("auto_showlocation")))
         self.menu.add_checkbutton(label="Auto /showlocation when boarding a ship (sends keys to the game)",
                                   variable=self._auto_var, command=self.toggle_auto_showlocation)
@@ -120,6 +134,7 @@ class Overlay:
                         lambda: self.cfg.get("read_contract_page", True),
                         lambda *read: self._pages.put(read)).start()
         self.root.after(POLL_MS, self.tick)
+        self.root.after(team.READ_S * 1000, self.read_team_every)
         self.watch_game()  # first check now, then every GAME_CHECK_MS
         self.root.after(FOCUS_MS, self.follow_focus)
         if windows.available():
@@ -217,9 +232,12 @@ class Overlay:
         config.save(self.cfg)
 
     def toggle_view(self):
-        self.cfg["view"] = "route" if self.cfg.get("view") == "cargo" else "cargo"
+        views = ["cargo", "route"] + (["team"] if self._team_code() else [])
+        view = self.cfg.get("view")
+        self.cfg["view"] = views[(views.index(view) + 1) % len(views)] if view in views else "cargo"
         config.save(self.cfg)
         self.render()
+        self.read_team()
 
     def _pick(self, title, items, current=None, extra=()):
         self.root.attributes("-topmost", False)
@@ -291,6 +309,7 @@ class Overlay:
 
     def quit(self):
         self.live.stop()
+        self.team.set(None, None)
         self._drag_end(None)
         self.root.destroy()
 
@@ -323,6 +342,10 @@ class Overlay:
         self.session.accepted.clear()  # read by the page watcher, the instant they come
         while not self._pages.empty():
             self._apply_pages(*self._pages.get())
+        while not self._calls.empty():
+            self._calls.get()()
+        if self.team.error != self._team_error:
+            self.render()
         self.check_clipboard()
         while not self._results.empty():
             self.plan = self._results.get()
@@ -515,11 +538,175 @@ class Overlay:
         """VerseTime on where we are, following the live position when the
         server runs."""
         port = int(self.cfg.get("live_port") or liveserver.DEFAULT_PORT) if self.live.running else None
-        liveserver.open_map(self.cfg.get("start") or self.session.here, port)
+        liveserver.open_map(self.cfg.get("start") or self.session.here, port, self._team_code())
+
+    # --- team --------------------------------------------------------------
+
+    def _team_code(self):
+        return (self.cfg.get("team") or {}).get("code")
+
+    def _team_menu_state(self):
+        inside = bool(self._team_code())
+        for label in ("Create a team", "Join a team… (code or invite link)"):
+            self.team_menu.entryconfigure(label, state="disabled" if inside else "normal")
+        for label in ("Copy the invite link", "Leave the team"):
+            self.team_menu.entryconfigure(label, state="normal" if inside else "disabled")
+
+    def _ask(self, title, prompt, initial=""):
+        self.root.attributes("-topmost", False)
+        try:
+            return simpledialog.askstring(title, prompt, initialvalue=initial, parent=self.root)
+        finally:
+            self.root.attributes("-topmost", True)
+
+    def ask_team_name(self):
+        """The pseudo the team sees. True when there is one."""
+        name = self._ask("Team", f"Your pseudo for the team (1 to {team.MAX_NAME} characters):",
+                         self.cfg.get("team_name") or "")
+        if name is not None and team.clean_name(name):
+            self.cfg["team_name"] = team.clean_name(name)
+            config.save(self.cfg)
+            self.render()  # sends it at once
+        return bool(self.cfg.get("team_name"))
+
+    def _in_background(self, work, done):
+        """work() on a thread (network), then done(result, error) on this one."""
+        def run():
+            try:
+                result, error = work(), None
+            except team.TeamError as e:
+                result, error = None, str(e)
+            self._calls.put(lambda: done(result, error))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _enter_team(self, code):
+        member, secret = team.new_member()
+        self.cfg["team"] = {"code": code, "member": member, "secret": secret}
+        self._members, self._members_error, self._open_members = None, None, set()
+        config.save(self.cfg)
+        self.status = f"Team {code}: invite link in the Team menu"
+        self.render()
+
+    def create_team(self):
+        if not self.cfg.get("team_name") and not self.ask_team_name():
+            return
+        self.status = "Creating the team…"
+        self.render()
+
+        def done(code, error):
+            if error:
+                self.status = f"Team not created: {error}"
+                self.render()
+            else:
+                self._enter_team(code)
+                self.copy_invite()
+        self._in_background(self.team.api.create, done)
+
+    def join_team(self):
+        text = self._ask("Join a team", "Team code or invite link:")
+        if text is None:
+            return
+        code = team.parse_code(text)
+        if not code:
+            self.status = "Not a team code or invite link"
+            self.render()
+            return
+        if not self.cfg.get("team_name") and not self.ask_team_name():
+            return
+        self._enter_team(code)
+
+    def copy_invite(self):
+        code = self._team_code()
+        if code:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(team.invite_link(code))
+            self.status = f"Team {code}: invite link copied"
+            self.render()
+
+    def leave_team(self):
+        t = self.cfg.get("team")
+        if not t:
+            return
+        self.cfg["team"] = None  # forget it at once: nothing more is sent
+        self._members, self._members_error, self._open_members = None, None, set()
+        if self.cfg.get("view") == "team":
+            self.cfg["view"] = "cargo"
+        config.save(self.cfg)
+        self.status = f"Left team {t['code']}"
+        self.render()
+
+        def done(_result, error):
+            if error:
+                self.status = f"Left team {t['code']} (the API keeps you 2 h at most: {error})"
+                self.render()
+        self._in_background(lambda: self.team.api.leave(t["code"], t["member"], t["secret"]), done)
+
+    def read_team_every(self):
+        self.read_team()
+        self.root.after(team.READ_S * 1000, self.read_team_every)
+
+    def read_team(self):
+        """The others in the team, for the Team view: read only while it shows."""
+        t = self.cfg.get("team")
+        if not t or self.cfg.get("view") != "team" or not self._shown or self._reading_team:
+            return
+        self._reading_team = True
+
+        def done(members, error):
+            self._reading_team = False
+            if (self.cfg.get("team") or {}).get("code") != t["code"]:
+                return  # left or changed team meanwhile
+            self._members_error = error
+            if members is not None:
+                self._members = [m for m in members if m.get("id") != t["member"]]
+            self.render()
+        self._in_background(lambda: self.team.api.members(t["code"]), done)
+
+    def toggle_member(self, member_id):
+        self._open_members ^= {member_id}
+        self.render()
+
+    def _shared_with(self, contract_id):
+        """Pseudos of the teammates who have this contract too."""
+        if not team.SHARE_BY_ID:
+            return []
+        return [m.get("name") or "?" for m in self._members or []
+                if any(c.get("id") == contract_id for c in (m.get("state") or {}).get("contracts") or [])]
+
+    def render_team(self):
+        if self._members is None:
+            text = f"Team: {self._members_error}" if self._members_error else "Reading the team…"
+            tk.Label(self.body, text=text, bg=BG, fg=DIM, font=FONT, anchor="w").pack(anchor="w")
+            return
+        if self._members_error:
+            tk.Label(self.body, text=f"Not read again: {self._members_error}", bg=BG, fg=WARN, font=FONT,
+                     anchor="w").pack(anchor="w")
+        if not self._members:
+            tk.Label(self.body, text="Nobody else in the team yet: Team → Copy the invite link", bg=BG, fg=DIM,
+                     font=FONT, anchor="w").pack(anchor="w")
+        for m in self._members:
+            line = tk.Label(self.body, text=team.member_line(m), bg=BG, fg=ACCENT, font=FONT, anchor="w",
+                            cursor="hand2")
+            line.pack(anchor="w", pady=(6, 0))
+            line.bind("<Button-1>", lambda _e, i=m.get("id"): self.toggle_member(i))
+            line.bind("<Button-3>", self._menu)
+            for text in team.crossings(self._live, m):
+                tk.Label(self.body, text="  " + text, bg=BG, fg=DONE, font=FONT, anchor="w").pack(anchor="w")
+            if m.get("id") in self._open_members:
+                shared = team.shared_ids(self._live, m)
+                for text in team.contract_lines(m, shared) or ["no contract"]:
+                    tk.Label(self.body, text="  " + text, bg=BG, fg=DIM if text[:1] != " " else FG, font=FONT,
+                             anchor="w", wraplength=460, justify="left").pack(anchor="w")
 
     def render(self):
-        self._live = liveserver.build_state(self.session.travel.ship, self.cfg.get("start"), self._start_source,
-                                            self.plan, time.time())
+        code = self._team_code()
+        self._live = team.fit_state(liveserver.build_state(
+            self.session.travel.ship, self.cfg.get("start"), self._start_source, self.plan, time.time(), code,
+            team.contracts_state(self.session.tracker), (self.cfg.get("team") or {}).get("member")))
+        t = self.cfg.get("team")
+        name = self.cfg.get("team_name")
+        self.team.set((t["code"], t["member"], t["secret"], name) if t and name else None, self._live)
+        self._team_error = self.team.error
         for w in self.body.winfo_children():
             w.destroy()
         contracts = self.session.tracker.active()
@@ -531,6 +718,13 @@ class Overlay:
         capacity = self.session.capacity()
         status = f"{where}   ·   Ship: {self.session.travel.ship}" + (f" ({capacity} SCU)" if capacity else "")
         tk.Label(self.body, text=status, bg=BG, fg=DIM, font=FONT, anchor="w").pack(anchor="w")
+        if code:
+            error = self._team_error
+            tk.Label(self.body, text=f"Team {code} · " + (f"not shared: {error}" if error else "sharing on"),
+                     bg=BG, fg=WARN if error else DIM, font=FONT, anchor="w").pack(anchor="w")
+        if view == "team" and code:
+            self.render_team()
+            return
         if not contracts:
             tk.Label(self.body, text="No hauling contract in Game.log", bg=BG, fg=DIM, font=FONT).pack(anchor="w")
             return
@@ -543,6 +737,8 @@ class Overlay:
             return
         for text, done, contract, leg in cargo_lines(self.session.tracker):
             if leg is None:
+                shared = self._shared_with(contract.id) if code else []
+                text += f"   · shared with {', '.join(shared)}" if shared else ""
                 title = tk.Label(self.body, text=text, bg=BG, fg=DIM, font=FONT, anchor="w", wraplength=460,
                                  justify="left", cursor="hand2")
                 title.pack(anchor="w", pady=(6, 0))

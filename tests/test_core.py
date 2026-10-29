@@ -413,6 +413,148 @@ class LiveServerTest(unittest.TestCase):
         self.assertEqual(liveserver.map_url("Port Tressler", 47823),
                          "https://ofs-versetime.netlify.app/?live=47823#Port_Tressler")
         self.assertEqual(liveserver.map_url("Lorville"), "https://ofs-versetime.netlify.app/#Lorville")
+        self.assertEqual(liveserver.map_url("Lorville", 47823, "abcdefgh23"),
+                         "https://ofs-versetime.netlify.app/?live=47823#team=abcdefgh23")
+        self.assertIsNone(state["team"])
+        self.assertEqual(liveserver.build_state("C2", None, "log", None, 0, "abcdefgh23")["team"], "abcdefgh23")
+        self.assertIsNone(state["teamMember"])  # not in a team
+        inside = liveserver.build_state("C2", None, "log", None, 0, "abcdefgh23", [], "m" * 16)
+        self.assertEqual(inside["teamMember"], "m" * 16)
+        self.assertIsNone(liveserver.build_state("C2", None, "log", None, 0, None, [], "m" * 16)["teamMember"])
+
+
+class TeamTest(unittest.TestCase):
+    def test_codes(self):
+        from schauling import team
+        self.assertEqual(team.parse_code(" ABCDEFGH23 "), "abcdefgh23")
+        self.assertEqual(team.parse_code("https://ofs-versetime.netlify.app/#team=abcdefgh23"), "abcdefgh23")
+        self.assertIsNone(team.parse_code("abcdefghi2"))  # no i, l, o in codes
+        self.assertIsNone(team.parse_code("abc"))
+        self.assertEqual(team.invite_link("abcdefgh23"), "https://ofs-versetime.netlify.app/#team=abcdefgh23")
+        member, secret = team.new_member()
+        self.assertRegex(member, r"^[a-z0-9]{16}$")
+        self.assertGreaterEqual(len(secret), 32)
+        self.assertEqual(team.clean_name("  Space   Trucker " + "x" * 30), ("Space Trucker " + "x" * 30)[:24])
+
+    def test_sharer_pace(self):
+        from schauling import team
+        now = [100.0]
+        sent = []
+
+        class Api:
+            fail = None
+
+            def put(self, *args):
+                if self.fail:
+                    raise team.TeamError(self.fail, "nope")
+                sent.append(args)
+        api = Api()
+        sharer = team.TeamSharer(api, clock=lambda: now[0])
+        sharer._thread = True  # no thread: send_once by hand
+        member = ("abcdefgh23", "m" * 16, "s" * 64, "Me")
+        self.assertIsNone(sharer.due(now[0]))  # not in a team: nothing to send
+        sharer.set(member, {"location": "Lorville", "updatedAt": "1"})
+        self.assertEqual(sharer.due(now[0]), 0)
+        self.assertTrue(sharer.send_once())
+        self.assertEqual(sent[-1][3:], ("Me", {"location": "Lorville", "updatedAt": "1"}))
+        sharer.set(member, {"location": "Lorville", "updatedAt": "1", "teamMember": "m" * 16})
+        sharer.send_once()
+        self.assertNotIn("teamMember", sent[-1][4])  # local only: not in the PUT
+        sharer.set(member, {"location": "Lorville", "updatedAt": "2"})  # same place: heartbeat only
+        self.assertEqual(sharer.due(now[0]), team.HEARTBEAT_S)
+        sharer.set(member, {"location": "Area18", "updatedAt": "3"})  # changed: 5 s after the last send
+        self.assertEqual(sharer.due(now[0] + 2), team.MIN_GAP_S - 2)
+        now[0] += 5
+        api.fail = 429
+        self.assertFalse(sharer.send_once())
+        self.assertEqual(sharer.error, "nope")
+        self.assertEqual(sharer.due(now[0]), team.RETRY_S)  # then the last state again
+        api.fail = None
+        now[0] += team.RETRY_S
+        self.assertTrue(sharer.send_once())
+        self.assertIsNone(sharer.error)
+        self.assertEqual(sent[-1][4]["location"], "Area18")
+        api.fail = 404  # team gone: stop trying
+        sharer.set(member, {"location": "Orison"})
+        now[0] += 60
+        sharer.send_once()
+        self.assertEqual(sharer.due(now[0] + 3600), float("inf"))
+        sharer.set(None, None)  # left the team
+        self.assertIsNone(sharer.due(now[0]))
+
+    def test_contracts_in_state(self):
+        from schauling import team
+        lines = [l for l in fixture_lines() if "774fcb71" in l]
+        cut = next(i for i, l in enumerate(lines) if "MISSION_OBJECTIVE_STATE_COMPLETED" in l)
+        t = Tracker(PLACES)
+        for line in lines[: cut + 1]:
+            t.feed(line)
+        [c] = team.contracts_state(t)
+        self.assertEqual(c["title"], "RSI Disc. Month: Important Supply Haul")
+        self.assertEqual(c["cargos"][0]["cargo"], "Ship Decoy Countermeasures")
+        self.assertEqual(c["cargos"][0]["to"], "Baijini Point")
+        self.assertIn(c["cargos"][0]["sure"], ("", "~", "?"))
+        self.assertEqual(set(c["cargos"][0]), {"cargo", "scu", "from", "to", "sure"})
+
+    def test_state_size(self):
+        from schauling import team
+        cargo = {"cargo": "Distilled Spirits", "scu": 24, "from": "Levski", "to": "Area18", "sure": ""}
+
+        def contract(i):
+            return {"id": f"id{i}", "title": "A long title " * 10, "tracked": False, "cargos": [cargo] * 4}
+        small = {"route": [], "contracts": [contract(i) for i in range(5)]}
+        self.assertIs(team.fit_state(small), small)  # under 16 KB: as it is
+        self.assertLess(len(json.dumps(small)), team.MAX_STATE)
+        big = {"route": [], "contracts": [contract(i) for i in range(60)]}
+        cut = team.fit_state(big)
+        size = len(json.dumps(cut, ensure_ascii=False).encode("utf-8"))
+        self.assertLessEqual(size, team.MAX_STATE)
+        self.assertTrue(all(c["title"] is None for c in cut["contracts"]))  # titles go first
+        self.assertEqual(cut["contracts"][-1]["id"], "id59")  # then the oldest contracts
+        self.assertLessEqual(len(cut["contracts"]), team.MAX_CONTRACTS)
+        many = {"contracts": [{"id": f"id{i}", "cargos": []} for i in range(40)]}
+        self.assertEqual([c["id"] for c in team.fit_state(many)["contracts"]][:1], ["id10"])  # the 30 newest
+        self.assertEqual(len(big["contracts"]), 60)  # the original stays whole
+        titles_only = {"contracts": [contract(i) for i in range(30)]}
+        self.assertEqual(len(team.fit_state(titles_only)["contracts"]), 30)  # dropping titles was enough
+
+    def test_crossings(self):
+        from schauling import team
+        mine = {"route": [{"place": "Area18", "arrival": "2026-10-29T20:00:00Z", "actions": [{"type": "unload"}]},
+                          {"place": "Levski", "arrival": "2026-10-29T20:30:00Z", "actions": [{"type": "load"}]}],
+                "contracts": [{"id": "m1"}, {"id": "m2"}]}
+        bob = {"id": "b", "name": "Bob", "state": {
+            "ship": "C2", "route": [{"place": "Area18", "arrival": "2026-10-29T20:12:00Z",
+                                     "actions": [{"type": "unload", "scu": 8}]},
+                                    {"place": "Orison", "arrival": None, "actions": []}],
+            "contracts": [{"id": "m2", "title": "Shared haul", "cargos": [{"cargo": "Gold"}]},
+                          {"id": "b1", "title": "Bob's haul", "tracked": True,
+                           "cargos": [{"cargo": "Gold", "scu": 8, "from": "Lorville", "to": None, "sure": "~"}]}]}}
+        [line] = team.crossings(mine, bob)
+        self.assertTrue(line.startswith("Bob unloads at Area18 too (+12m) at "), line)
+        self.assertEqual(team.shared_ids(mine, bob), {"m2"})
+        lines = team.contract_lines(bob, team.shared_ids(mine, bob))
+        self.assertEqual(lines[0], "Shared haul   (shared with you)")  # not repeated
+        self.assertEqual(lines[1:], ["▶ Bob's haul", "  ~Lorville → ~? : 8 SCU Gold"])
+        self.assertTrue(team.member_line(bob).startswith("Bob · C2 · next Area18 "))
+        self.assertTrue(team.member_line(bob).endswith("· 2 contract(s)"))
+        self.assertEqual(team.crossings(mine, {"name": "Al", "state": None}), [])
+
+    def test_api_requests(self):
+        from schauling import team
+        calls = []
+
+        def request(method, url, body=None, secret=None):
+            calls.append((method, url, body, secret))
+            return {"team": "abcdefgh23"}
+        api = team.TeamApi("http://localhost:8787/", request)
+        self.assertEqual(api.create(), "abcdefgh23")
+        api.put("abcdefgh23", "m1", "s1", "Me", {"route": []})
+        api.leave("abcdefgh23", "m1", "s1")
+        self.assertEqual(calls, [
+            ("POST", "http://localhost:8787/teams", None, None),
+            ("PUT", "http://localhost:8787/teams/abcdefgh23/members/m1", {"name": "Me", "state": {"route": []}}, "s1"),
+            ("DELETE", "http://localhost:8787/teams/abcdefgh23/members/m1", None, "s1")])
 
 
 class PlacesTest(unittest.TestCase):

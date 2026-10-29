@@ -24,6 +24,9 @@ DEFAULTS = {
     "click_through": True,  # clicks outside the texts go to the game
     "live_server": True,  # 127.0.0.1 server for the VerseTime map: position and route
     "live_port": 47823,
+    "team": None,  # {"code", "member", "secret"} while in a team: the state goes to the API
+    "team_name": "",  # pseudo shown to the team
+    "team_api": None,  # another API for teams (tests: http://localhost:8787)
 }
 
 
