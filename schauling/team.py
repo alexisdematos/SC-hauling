@@ -114,10 +114,10 @@ class TeamApi:
 # --- what we show the team ----------------------------------------------
 
 def _sure(*stops):
-    marks = {s.confidence for s in stops if not s.name.startswith("?")}
-    if len(marks) < len(stops) or UNKNOWN in marks:
+    """"?" when a place is unknown, "~" when one is guessed, else ""."""
+    if any(s.name.startswith("?") or s.confidence == UNKNOWN for s in stops):
         return "?"
-    return "~" if GUESS in marks else ""
+    return "~" if any(s.confidence == GUESS for s in stops) else ""
 
 
 def contracts_state(tracker):

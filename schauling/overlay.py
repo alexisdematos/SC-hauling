@@ -159,8 +159,7 @@ class Overlay:
             if right and not self._right and self._through and self._over_overlay(x, y):
                 self.menu.tk_popup(x, y)
             if not windows.mouse_button_down():
-                under = self.root.winfo_containing(x, y)
-                through = not (isinstance(under, tk.Label) and under.cget("text"))
+                through = not self._text_at(x, y)
                 if through != self._through:
                     self._through = through
                     windows.set_click_through(int(self.root.wm_frame(), 16), through)
@@ -169,6 +168,15 @@ class Overlay:
             windows.set_click_through(int(self.root.wm_frame(), 16), False)
         self._right = right
         self.root.after(CURSOR_MS, self.follow_cursor)
+
+    def _text_at(self, x, y):
+        """Is a text of ours (a line, the header) under the screen point?
+        By position: once the window lets clicks through, Windows no longer
+        finds it under the mouse, so winfo_containing() gives None."""
+        for w in [self.header] + self.body.winfo_children():
+            if isinstance(w, tk.Label) and w.cget("text") and                     w.winfo_rootx() <= x < w.winfo_rootx() + w.winfo_width() and                     w.winfo_rooty() <= y < w.winfo_rooty() + w.winfo_height():
+                return True
+        return False
 
     def _over_overlay(self, x, y):
         r = self.root

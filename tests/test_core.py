@@ -496,6 +496,15 @@ class TeamTest(unittest.TestCase):
         self.assertIn(c["cargos"][0]["sure"], ("", "~", "?"))
         self.assertEqual(set(c["cargos"][0]), {"cargo", "scu", "from", "to", "sure"})
 
+    def test_sure(self):
+        from schauling import team
+        from schauling.tracker import UNKNOWN, Stop
+        a, b = Stop("Levski", None, EXACT), Stop("Lorville", None, EXACT)
+        self.assertEqual(team._sure(a, b), "")
+        self.assertEqual(team._sure(a, Stop("Lorville", None, GUESS)), "~")
+        self.assertEqual(team._sure(a, Stop("Lorville", None, UNKNOWN)), "?")
+        self.assertEqual(team._sure(Stop("? (not in SC-map)", None, EXACT), b), "?")
+
     def test_state_size(self):
         from schauling import team
         cargo = {"cargo": "Distilled Spirits", "scu": 24, "from": "Levski", "to": "Area18", "sure": ""}
