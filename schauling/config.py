@@ -4,6 +4,8 @@ import os
 import sys
 from pathlib import Path
 
+from .liveserver import OLD_SITE, SITE
+
 DEFAULTS = {
     "log": None,
     "scmap_data": None,
@@ -24,8 +26,12 @@ DEFAULTS = {
     "click_through": True,  # clicks outside the texts go to the game
     "live_server": True,  # 127.0.0.1 server for the VerseTime map: position and route
     "live_port": 47823,
+    "site_url": SITE,  # VerseTime site: map, invite links, allowed origin
     "team": None,  # {"code", "member", "secret"} while in a team: the state goes to the API
     "team_name": "",  # pseudo shown to the team
+    "trade": False,  # goods to buy and sell on the way (UEX prices, from the API): off, no call
+    "trade_budget": 100000,  # aUEC we may tie up in goods at once
+    "trade_illegal": False,  # include illegal goods
     "team_api": None,  # another API for teams (tests: http://localhost:8787)
 }
 
@@ -41,6 +47,13 @@ def load():
         cfg.update(json.loads((folder() / "config.json").read_text(encoding="utf-8")))
     except (OSError, ValueError):
         pass
+    return migrate(cfg)
+
+
+def migrate(cfg):
+    """The site moved to Cloudflare: the old default goes, a URL set by hand stays."""
+    if (cfg.get("site_url") or "").rstrip("/") == OLD_SITE:
+        cfg["site_url"] = SITE
     return cfg
 
 

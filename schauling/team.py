@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime
 
 from .api import API_URL, USER_AGENT
-from .liveserver import SITE
+from . import liveserver
 from .tracker import GUESS, UNKNOWN
 
 MIN_GAP_S = 5
@@ -53,7 +53,7 @@ def parse_code(text):
 
 
 def invite_link(code):
-    return f"{SITE}/#team={code}"
+    return f"{liveserver.site()}/#team={code}"
 
 
 def clean_name(name):

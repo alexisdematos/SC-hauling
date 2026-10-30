@@ -1,5 +1,6 @@
 """Plain-text lines for the overlay and the console."""
 from .routing import peak_load
+from .trade import lines_at, money
 from .tracker import GUESS, UNKNOWN
 
 
@@ -39,8 +40,10 @@ def cargo_lines(tracker):
     return out
 
 
-def route_lines(plan, capacity=None):
-    """The stops in order; with the ship's cargo SCU, the most aboard at once."""
+def route_lines(plan, capacity=None, trades=()):
+    """The stops in order; with the ship's cargo SCU, the most aboard at once.
+    trades: goods to buy and sell on the way (trade.suggest), after the
+    contract cargos of each stop."""
     out = []
     for i, stop in enumerate(plan.stops, 1):
         jump = f", jump {' → '.join(stop.via)}" if stop.via else ""
@@ -54,6 +57,7 @@ def route_lines(plan, capacity=None):
         for a in stop.actions:
             arrow = "↑ load" if a.kind == "pickup" else "↓ unload"
             out.append(f"     {arrow} {_cargo(a.leg)}")
+        out.extend(lines_at(trades, i - 1))
     for a in plan.unplaced:
         what = "pickup" if a.kind == "pickup" else "delivery"
         out.append(f"?  {what} place unknown: {_cargo(a.leg)}")
@@ -64,4 +68,6 @@ def route_lines(plan, capacity=None):
             out.append(f"Too much: up to {peak} SCU aboard, the ship holds {capacity}")
         elif capacity:
             out.append(f"Max aboard: {peak} / {capacity} SCU")
+        if trades:
+            out.append(f"Trade on the way: +{money(sum(t.profit for t in trades))} (UEX prices)")
     return out

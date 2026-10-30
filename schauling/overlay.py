@@ -11,7 +11,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog
 
-from . import config, keys, liveserver, ocr, team, windows
+from . import config, keys, liveserver, ocr, team, trade, windows
 from .pagewatch import PageWatcher
 from .picker import pick
 from .places import START_RADIUS_KM, parse_coordinates
@@ -23,6 +23,7 @@ DIM = "#6f8796"
 ACCENT = "#e8b54a"
 DONE = "#5fbf7a"
 WARN = "#e8664a"
+TRADE = "#7fc8e8"  # goods bought and sold on the way, not contract cargo
 FONT = ("Segoe UI", 10)
 FONT_BOLD = ("Segoe UI", 10, "bold")
 
@@ -55,6 +56,7 @@ class Overlay:
         self.status = None  # one-line message under the header
         self._start_source = "log"  # log, showlocation or manual: for the live map
         self._live = {}  # the /state answer, rebuilt on this thread at each render
+        liveserver.set_site(cfg.get("site_url"))
         self.live = liveserver.LiveServer(lambda: self._live)
         self.team = team.TeamSharer(team.TeamApi(cfg.get("team_api") or team.API_URL))
         self._team_error = None  # the error on the status line, to redraw when it changes
@@ -63,6 +65,8 @@ class Overlay:
         self._members_error = None
         self._reading_team = False
         self._open_members = set()  # member ids whose contracts are shown
+        self.prices = trade.Prices(cfg.get("team_api") or team.API_URL)
+        self._fetching_prices = False
 
         self.root = tk.Tk()
         self.root.title("SC Hauling")
@@ -98,6 +102,15 @@ class Overlay:
         self.team_menu.add_command(label="Copy the invite link", command=self.copy_invite)
         self.team_menu.add_command(label="Leave the team", command=self.leave_team)
         self.menu.add_cascade(label="Team (shares position and route on the Internet)", menu=self.team_menu)
+        self._trade_var = tk.BooleanVar(value=bool(cfg.get("trade")))
+        self._illegal_var = tk.BooleanVar(value=bool(cfg.get("trade_illegal")))
+        trade_menu = tk.Menu(self.menu, tearoff=0)
+        trade_menu.add_checkbutton(label="Suggest goods to buy and sell on the route", variable=self._trade_var,
+                                   command=self.toggle_trade)
+        trade_menu.add_checkbutton(label="Include illegal goods", variable=self._illegal_var,
+                                   command=self.toggle_trade)
+        trade_menu.add_command(label="Budget…", command=self.ask_trade_budget)
+        self.menu.add_cascade(label="Trade on the way (UEX prices)", menu=trade_menu)
         self._auto_var = tk.BooleanVar(value=bool(cfg.get("auto_showlocation")))
         self.menu.add_checkbutton(label="Auto /showlocation when boarding a ship (sends keys to the game)",
                                   variable=self._auto_var, command=self.toggle_auto_showlocation)
@@ -363,6 +376,7 @@ class Overlay:
         if self.team.error != self._team_error:
             self.render()
         self.check_clipboard()
+        self.refresh_prices()
         while not self._results.empty():
             self.plan = self._results.get()
             self._planning = False
@@ -568,6 +582,39 @@ class Overlay:
         for label in ("Copy the invite link", "Leave the team"):
             self.team_menu.entryconfigure(label, state="normal" if inside else "disabled")
 
+    def toggle_trade(self):
+        self.cfg["trade"] = bool(self._trade_var.get())
+        self.cfg["trade_illegal"] = bool(self._illegal_var.get())
+        config.save(self.cfg)
+        self.refresh_prices()
+        self.render()
+
+    def ask_trade_budget(self):
+        text = self._ask("Trade", "aUEC you may spend on goods at once:", str(self.cfg.get("trade_budget") or ""))
+        try:
+            budget = int(float((text or "").replace(" ", "").replace(",", "").lower().replace("k", "e3")))
+        except ValueError:
+            return
+        if budget > 0:
+            self.cfg["trade_budget"] = budget
+            config.save(self.cfg)
+            self.render()
+
+    def refresh_prices(self):
+        """Prices of the route's stops, when trade is on and they are missing
+        or old. Nothing asked while trade is off."""
+        if not self.cfg.get("trade") or not self.plan or self._fetching_prices:
+            return
+        missing = self.prices.missing(s.place for s in self.plan.stops)
+        if not missing:
+            return
+        self._fetching_prices = True
+
+        def done(_result, _error):
+            self._fetching_prices = False
+            self.render()
+        self._in_background(lambda: self.prices.fetch(missing), done)
+
     def _ask(self, title, prompt, initial=""):
         self.root.attributes("-topmost", False)
         try:
@@ -759,10 +806,22 @@ class Overlay:
             tk.Label(self.body, text="No hauling contract in Game.log", bg=BG, fg=DIM, font=FONT).pack(anchor="w")
             return
         if view == "route":
-            lines = route_lines(self.plan, capacity) if self.plan else ["Planning…"]
+            trades = []
+            if self.cfg.get("trade") and self.plan:
+                trades = trade.suggest(self.plan, capacity, self.prices.data, self.cfg.get("trade_budget"),
+                                       self.cfg.get("trade_illegal"))
+            lines = route_lines(self.plan, capacity, trades) if self.plan else ["Planning…"]
+            if self.cfg.get("trade") and self.plan:
+                if not capacity:
+                    lines.append("Trade: cargo SCU of the ship unknown")
+                elif self.prices.error:
+                    lines.append(f"Trade: no prices ({self.prices.error})")
+                elif not trades and not self._fetching_prices:
+                    lines.append("Trade: nothing worth it on this route")
             for text in lines:
                 color = ACCENT if text[:1].isdigit() else (DIM if text.startswith(("Total", "Max")) else FG)
                 color = WARN if text.startswith("Too much") else color
+                color = TRADE if "(trade" in text or text.startswith("Trade") else color
                 tk.Label(self.body, text=text, bg=BG, fg=color, font=FONT, anchor="w", justify="left").pack(anchor="w")
             return
         for text, done, contract, leg in cargo_lines(self.session.tracker):

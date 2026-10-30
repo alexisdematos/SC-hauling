@@ -43,16 +43,21 @@ def _left(leg):
     return max((leg.total or 0) - (leg.amount or 0), 0)
 
 
-def peak_load(plan):
-    """Most SCU aboard at once along the plan: what is already aboard, then at
-    each stop unload first, load next."""
+def loads(plan):
+    """SCU aboard at the start, then on leaving each stop: unload first,
+    load next. Already aboard: the deliveries picked up before."""
     load = sum(_left(a.leg) for s in plan.stops for a in s.actions if a.kind == "dropoff" and a.leg.picked)
-    peak = load
+    out = [load]
     for stop in plan.stops:
         load -= sum(_left(a.leg) for a in stop.actions if a.kind == "dropoff")
         load += sum(_left(a.leg) for a in stop.actions if a.kind == "pickup")
-        peak = max(peak, load)
-    return peak
+        out.append(load)
+    return out
+
+
+def peak_load(plan):
+    """Most SCU aboard at once along the plan."""
+    return max(loads(plan))
 
 
 def build_actions(tracker):

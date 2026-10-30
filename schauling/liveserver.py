@@ -1,8 +1,9 @@
 """Where you are and your route, for the VerseTime map in the browser.
 
 A small HTTP server on 127.0.0.1 only (nothing from the network reaches
-it) answers GET /state with JSON. Only the VerseTime site (and localhost,
-for its development) may read it from a page: other sites get no CORS
+it) answers GET /state with JSON. Only the VerseTime site (site_url, and
+the old Netlify address, where tabs may stay open; localhost for its development) may
+read it from a page: other sites get no CORS
 header, so the browser keeps the answer from them.
 """
 import json
@@ -14,13 +15,25 @@ import webbrowser
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-SITE = "https://ofs-versetime.netlify.app"
+SITE = "https://versetime.ofs.workers.dev"  # default site_url
+OLD_SITE = "https://ofs-versetime.netlify.app"  # before the move to Cloudflare: still allowed, tabs may stay open
+_site = SITE
 DEFAULT_PORT = 47823
 _LOCAL_ORIGIN = re.compile(r"^http://(?:localhost|127\.0\.0\.1)(?::\d+)?$")
 
 
+def set_site(url):
+    """The VerseTime site to open and allow (site_url in config.json)."""
+    global _site
+    _site = (url or SITE).rstrip("/")
+
+
+def site():
+    return _site
+
+
 def allowed_origin(origin):
-    return bool(origin) and (origin == SITE or bool(_LOCAL_ORIGIN.match(origin)))
+    return bool(origin) and (origin in (_site, SITE, OLD_SITE) or bool(_LOCAL_ORIGIN.match(origin)))
 
 
 def _iso(t):
@@ -147,7 +160,7 @@ def map_url(place, port=None, team=None):
         anchor = f"#team={team}"
     else:
         anchor = "#" + urllib.parse.quote(place.replace(" ", "_")) if place else ""
-    return f"{SITE}/{query}{anchor}"
+    return f"{_site}/{query}{anchor}"
 
 
 def open_map(place, port=None, team=None):

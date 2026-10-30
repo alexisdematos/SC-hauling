@@ -411,10 +411,10 @@ class LiveServerTest(unittest.TestCase):
         finally:
             server.stop()
         self.assertEqual(liveserver.map_url("Port Tressler", 47823),
-                         "https://ofs-versetime.netlify.app/?live=47823#Port_Tressler")
-        self.assertEqual(liveserver.map_url("Lorville"), "https://ofs-versetime.netlify.app/#Lorville")
+                         "https://versetime.ofs.workers.dev/?live=47823#Port_Tressler")
+        self.assertEqual(liveserver.map_url("Lorville"), "https://versetime.ofs.workers.dev/#Lorville")
         self.assertEqual(liveserver.map_url("Lorville", 47823, "abcdefgh23"),
-                         "https://ofs-versetime.netlify.app/?live=47823#team=abcdefgh23")
+                         "https://versetime.ofs.workers.dev/?live=47823#team=abcdefgh23")
         self.assertIsNone(state["team"])
         self.assertEqual(liveserver.build_state("C2", None, "log", None, 0, "abcdefgh23")["team"], "abcdefgh23")
         self.assertIsNone(state["teamMember"])  # not in a team
@@ -423,6 +423,43 @@ class LiveServerTest(unittest.TestCase):
         self.assertIsNone(liveserver.build_state("C2", None, "log", None, 0, None, [], "m" * 16)["teamMember"])
 
 
+    def test_site_moves(self):
+        import socket
+        import urllib.request
+        from schauling import liveserver, team
+        new = "https://versetime.example.dev"  # a site_url set by hand
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        liveserver.set_site(new + "/")
+        server = liveserver.LiveServer(lambda: {})
+        server.start(port)
+        try:
+            def allowed(origin):
+                req = urllib.request.Request(f"http://127.0.0.1:{port}/state", headers={"Origin": origin})
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    return r.headers["Access-Control-Allow-Origin"]
+            self.assertEqual(allowed(new), new)
+            self.assertEqual(allowed("https://ofs-versetime.netlify.app"), "https://ofs-versetime.netlify.app")
+            self.assertEqual(allowed("https://versetime.ofs.workers.dev"), "https://versetime.ofs.workers.dev")
+            self.assertEqual(allowed("http://127.0.0.1:5173"), "http://127.0.0.1:5173")
+            self.assertIsNone(allowed("https://versetime.evil.workers.dev"))
+            self.assertEqual(liveserver.map_url("Lorville", 47823), new + "/?live=47823#Lorville")
+            self.assertEqual(team.invite_link("abcdefgh23"), new + "/#team=abcdefgh23")
+            for link in (new + "/#team=abcdefgh23", "https://ofs-versetime.netlify.app/#team=abcdefgh23"):
+                self.assertEqual(team.parse_code(link), "abcdefgh23")
+        finally:
+            server.stop()
+            liveserver.set_site(None)
+
+    def test_site_url_migration(self):
+        from schauling import config
+        for old in ("https://ofs-versetime.netlify.app", "https://ofs-versetime.netlify.app/"):
+            self.assertEqual(config.migrate({"site_url": old})["site_url"], "https://versetime.ofs.workers.dev")
+        for mine in ("http://localhost:5173", "https://ofs-versetime.netlify.app/beta", None):
+            self.assertEqual(config.migrate({"site_url": mine})["site_url"], mine)
+        self.assertEqual(config.DEFAULTS["site_url"], "https://versetime.ofs.workers.dev")
+
 class TeamTest(unittest.TestCase):
     def test_codes(self):
         from schauling import team
@@ -430,7 +467,7 @@ class TeamTest(unittest.TestCase):
         self.assertEqual(team.parse_code("https://ofs-versetime.netlify.app/#team=abcdefgh23"), "abcdefgh23")
         self.assertIsNone(team.parse_code("abcdefghi2"))  # no i, l, o in codes
         self.assertIsNone(team.parse_code("abc"))
-        self.assertEqual(team.invite_link("abcdefgh23"), "https://ofs-versetime.netlify.app/#team=abcdefgh23")
+        self.assertEqual(team.invite_link("abcdefgh23"), "https://versetime.ofs.workers.dev/#team=abcdefgh23")
         member, secret = team.new_member()
         self.assertRegex(member, r"^[a-z0-9]{16}$")
         self.assertGreaterEqual(len(secret), 32)
@@ -1182,6 +1219,126 @@ class RoutingTest(unittest.TestCase):
         stops, total = plan(acts, travel)
         self.assertEqual([s.place for s in stops], ["X", "Y", "X"])
         self.assertEqual(total, 120)
+
+
+class TradeTest(unittest.TestCase):
+    NOW = 1_800_000_000
+
+    def route(self):
+        """A → B → C, 46 SCU ship: 6 SCU aboard to B, 24 SCU from A to C."""
+        from types import SimpleNamespace as Leg
+        from schauling.routing import Plan, PlanStop
+        aboard = Leg(total=6, amount=0, picked=True, cargo="Gold")
+        a = Leg(total=24, amount=0, picked=False, cargo="Souvenirs")
+        return Plan([PlanStop("A", [Action("pickup", "A", a, "c")]),
+                     PlanStop("B", [Action("dropoff", "B", aboard, "c")]),
+                     PlanStop("C", [Action("dropoff", "C", a, "c")])], [], 0)
+
+    def good(self, name, buy=None, sell=None, stock=None, demand=None, sizes=(1,), illegal=False, age=0):
+        return {"name": name, "buy": buy, "sell": sell, "stockBuy": stock, "demandSell": demand,
+                "containerSizes": list(sizes), "illegal": illegal, "updatedAt": self.NOW - age}
+
+    def test_free_space(self):
+        from schauling.trade import free_space
+        # Leaving A: 6 + 24 aboard; leaving B: 24; leaving C: none.
+        self.assertEqual(free_space(self.route(), 46), [16, 22, 46])
+
+    def test_simple_pair(self):
+        from schauling.report import route_lines
+        from schauling.trade import suggest
+        prices = {"A": [self.good("Agricium", buy=2500)], "C": [self.good("Agricium", sell=2780)]}
+        [t] = suggest(self.route(), 46, prices, 1_000_000, now=self.NOW)
+        self.assertEqual((t.buy_at, t.sell_at, t.scu), (0, 2, 16))  # the space is 16 on leaving A
+        self.assertEqual(t.profit, 280 * 16)
+        lines = route_lines(self.route(), 46, [t])
+        self.assertIn("     ↑ buy 16 SCU Agricium (trade)", lines)
+        self.assertIn("     ↓ sell 16 SCU Agricium +4k (trade)", lines)
+        self.assertLess(lines.index("     ↑ buy 16 SCU Agricium (trade)"), lines.index("2. B"))
+        self.assertIn("Trade on the way: +4k (UEX prices)", lines)
+
+    def test_limits(self):
+        from schauling.trade import suggest
+        route = self.route()
+        stock = {"B": [self.good("Laranite", buy=1000, stock=10)], "C": [self.good("Laranite", sell=1200)]}
+        self.assertEqual(suggest(route, 46, stock, 10 ** 6, now=self.NOW)[0].scu, 10)
+        demand = {"B": [self.good("Laranite", buy=1000)], "C": [self.good("Laranite", sell=1200, demand=12)]}
+        self.assertEqual(suggest(route, 46, demand, 10 ** 6, now=self.NOW)[0].scu, 12)
+        budget = {"B": [self.good("Laranite", buy=1000)], "C": [self.good("Laranite", sell=1200)]}
+        self.assertEqual(suggest(route, 46, budget, 10_500, now=self.NOW)[0].scu, 10)
+        # 22 free leaving B, containers of 8 only: 16.
+        boxes = {"B": [self.good("Laranite", buy=1000, sizes=(8, 16))], "C": [self.good("Laranite", sell=1200)]}
+        self.assertEqual(suggest(route, 46, boxes, 10 ** 6, now=self.NOW)[0].scu, 16)
+        # Not sold for more, or no capacity: nothing.
+        loss = {"B": [self.good("Laranite", buy=1000)], "C": [self.good("Laranite", sell=900)]}
+        self.assertEqual(suggest(route, 46, loss, 10 ** 6, now=self.NOW), [])
+        self.assertEqual(suggest(route, None, budget, 10 ** 6, now=self.NOW), [])
+        # Under MIN_PROFIT: not worth the stop.
+        small = {"B": [self.good("Laranite", buy=1000, stock=2)], "C": [self.good("Laranite", sell=1200)]}
+        self.assertEqual(suggest(route, 46, small, 10 ** 6, now=self.NOW), [])
+
+    def test_illegal_and_old(self):
+        from schauling.trade import lines_at, suggest
+        prices = {"A": [self.good("Widow", buy=5000, illegal=True)], "B": [self.good("Widow", sell=6000)]}
+        self.assertEqual(suggest(self.route(), 46, prices, 10 ** 6, now=self.NOW), [])
+        [t] = suggest(self.route(), 46, prices, 10 ** 6, illegal=True, now=self.NOW)
+        self.assertFalse(t.old)
+        prices["B"][0]["updatedAt"] = self.NOW - 3 * 24 * 3600  # days old: usual for UEX
+        self.assertFalse(suggest(self.route(), 46, prices, 10 ** 6, illegal=True, now=self.NOW)[0].old)
+        prices["B"][0]["updatedAt"] = self.NOW - 8 * 24 * 3600
+        [t] = suggest(self.route(), 46, prices, 10 ** 6, illegal=True, now=self.NOW)
+        self.assertEqual(lines_at([t], 1), ["     ↓ sell 16 SCU Widow +16k (trade, old prices)"])
+
+    def test_greedy_takes_the_space(self):
+        from schauling.trade import suggest
+        # Best: Gold A → C (16 SCU, the space leaving A). Then A → B is full:
+        # Agricium only fits B → C, in the 22 - 16 = 6 left.
+        prices = {"A": [self.good("Gold", buy=100), self.good("Agricium", buy=10)],
+                  "B": [self.good("Agricium", buy=10, sell=40)],
+                  "C": [self.good("Gold", sell=2100), self.good("Agricium", sell=990)]}
+        trades = suggest(self.route(), 46, prices, 10 ** 6, now=self.NOW)
+        self.assertEqual([(t.name, t.buy_at, t.sell_at, t.scu) for t in trades],
+                         [("Gold", 0, 2, 16), ("Agricium", 1, 2, 6)])
+
+    def test_prices_answer(self):
+        from schauling.trade import parse_prices
+        def good(name, buy=None, sell=None, stock=0, demand=0, sizes=(1, 2), when="2026-10-30T10:00:00Z"):
+            return {"name": name, "buy": buy, "sell": sell, "stockBuy": stock, "demandSell": demand,
+                    "containerSizes": list(sizes), "illegal": False, "updatedAt": when}
+        answer = {"source": "uex", "fetchedAt": "2026-10-30T11:00:00Z", "unknown": ["nowhere"],
+                  "names": {"area18": "Area18"}, "places": {"area18": [
+                      dict(good("Agricium", buy=8379, stock=8, sizes=(1, 2, 4)), terminal="TDD Area 18"),
+                      dict(good("Gold", sell=6000, demand=40), terminal="TDD Area 18"),
+                      dict(good("Agricium", buy=8100, stock=None, when=None), terminal="Admin Area 18"),
+                      dict(good("Gold", sell=6200, demand=None, when="2026-10-29T09:00:00Z"), terminal="Admin Area 18")]}}
+        prices = parse_prices(answer)
+        self.assertEqual(list(prices), ["area18"])  # under the name we sent; unknown places: none
+        agricium, gold = prices["area18"]
+        # Bought at the cheapest terminal, with its stock (0: unknown) and date.
+        self.assertEqual((agricium["buy"], agricium["stockBuy"], agricium["buyUpdatedAt"]), (8100, None, None))
+        self.assertIsNone(agricium["sell"])
+        self.assertEqual((gold["sell"], gold["demandSell"], gold["sellUpdatedAt"]), (6200, None, "2026-10-29T09:00:00Z"))
+        self.assertIsNone(gold["buy"])
+
+    def test_prices_fetch(self):
+        from schauling.trade import CACHE_S, Prices
+        asked, clock = [], [0.0]
+
+        def request(method, url, body=None, secret=None):
+            asked.append(url)
+            return {"places": {"Levski": [{"terminal": "Levski", "name": "Agricium", "buy": 2500}]},
+                    "unknown": ["Area18"]}
+        p = Prices("http://api", request, clock=lambda: clock[0])
+        self.assertEqual(p.missing(["Levski", "Area18"]), ["Area18", "Levski"])
+        self.assertIsNone(p.fetch(["Area18", "Levski"]))
+        self.assertEqual(asked, ["http://api/commodities?places=Area18%2CLevski"])
+        self.assertEqual(p.data["Area18"], [])
+        self.assertEqual(p.data["Levski"][0]["buy"], 2500)
+        self.assertEqual(p.missing(["Levski"]), [])
+        clock[0] = CACHE_S + 1
+        self.assertEqual(p.missing(["Levski"]), ["Levski"])
+        asked.clear()
+        p.fetch([f"P{n:02d}" for n in range(61)])  # 60 places per ask at most
+        self.assertEqual(len(asked), 2)
 
 
 class TravelTimesTest(unittest.TestCase):
