@@ -3,7 +3,7 @@ import re
 import time
 from pathlib import Path
 
-from . import config, titles
+from . import config, heading, titles
 from .api import TravelTimes, local_times
 from .locations import location_code, place_for_code
 from .logparser import parse_line
@@ -56,9 +56,11 @@ class Session:
         self.tracker = Tracker(self.places, self.manual, items=self.items, hidden=self.hidden,
                                titles=self.titles)
         self.here = None
+        self.heading = None
         for line in self.source.initial():
             self.tracker.feed(line)
             self._see_ship(line)
+            self._see_heading(line)
             self._see_place(line)
         for mission in list(self.pages):
             if mission in self.tracker.contracts:
@@ -79,6 +81,29 @@ class Session:
             return False
         if place:
             self.here = place.name
+            return True
+        return False
+
+    def _see_heading(self, line):
+        """The quantum destination picked last, until we get there. True
+        when it changed. Before _see_place: a start "Stanton Gateway" needs
+        the last place."""
+        new = heading.parse(line, self.places, self._gateway)
+        if new:
+            new["eta"] = None  # the overlay asks the travel time
+            self.heading = new
+            return True
+        if self.heading and "RequestLocationInventory" in line:
+            place = place_for_code(location_code(line), self.places)
+            if place and place.name == self.heading["to"]:
+                self.heading = None  # arrived
+                return True
+        return False
+
+    def heading_expired(self, now):
+        """Drop a heading too old to be true. True when it did."""
+        if self.heading and heading.expired(self.heading, now):
+            self.heading = None
             return True
         return False
 
@@ -140,6 +165,8 @@ class Session:
                 self.ship_changed = True
             if "channel" in line and boarded_ship(line, self._ship_names):
                 self.boarded = True
+            if self._see_heading(line):
+                self.heading_changed = True
             if self._see_place(line):
                 self.place_changed = True
             if "Contract Accepted" in line:
@@ -157,6 +184,9 @@ class Session:
     # Set when the log says where the player is (local inventory of a place).
     place_changed = False
     here = None
+    # Quantum destination: {"from", "to", "picked_at", "eta"} (unix seconds), or None.
+    heading = None
+    heading_changed = False
 
     def snapshot(self):
         """Actions to plan, read on the thread that feeds the tracker."""

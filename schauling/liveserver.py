@@ -27,12 +27,13 @@ def _iso(t):
     return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def build_state(ship, location, source, plan, now, team=None, contracts=None, team_member=None):
+def build_state(ship, location, source, plan, now, team=None, contracts=None, team_member=None, heading=None):
     """The /state answer: ship, where we are, and the stops of the route
     with their arrival time, jump and cargo (SC-map place names). team: the
     code of the team we share with, so the map shows it too. contracts: see
     team.contracts_state. team_member: our member id, so the map knows which
-    teammate we are (local only: team.TeamSharer leaves it out of the PUT)."""
+    teammate we are (local only: team.TeamSharer leaves it out of the PUT).
+    heading: the quantum destination picked last (session.heading)."""
     route = []
     for stop in plan.stops if plan else []:
         route.append({
@@ -45,7 +46,10 @@ def build_state(ship, location, source, plan, now, team=None, contracts=None, te
         })
     return {"version": 1, "updatedAt": _iso(now), "ship": ship, "location": location,
             "locationSource": source if location else None, "route": route, "team": team,
-            "contracts": contracts or [], "teamMember": team_member if team else None}
+            "contracts": contracts or [], "teamMember": team_member if team else None,
+            "heading": {"from": heading["from"], "to": heading["to"],
+                        "pickedAt": _iso(heading["picked_at"]) if heading.get("picked_at") else None,
+                        "eta": _iso(heading["eta"]) if heading.get("eta") else None} if heading else None}
 
 
 class _Handler(BaseHTTPRequestHandler):

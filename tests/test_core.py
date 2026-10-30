@@ -496,6 +496,80 @@ class TeamTest(unittest.TestCase):
         self.assertIn(c["cargos"][0]["sure"], ("", "~", "?"))
         self.assertEqual(set(c["cargos"][0]), {"cargo", "scu", "from", "to", "sure"})
 
+    def test_heading(self):
+        from types import SimpleNamespace
+        from schauling import heading, liveserver, team
+        from schauling.session import Session
+        qt = ("<2026-10-30T11:00:00.000Z> [Notice] <Calculate Route> [ItemNavigation][CL][1] | NOT AUTH | "
+              "DRAK_Caterpillar_1[1]|CSCItemNavigation::CalculateRoute|Projected Start Location is {} for route "
+              "to destination {} [Team_CGP4][QuantumNavigation]")
+        inv = ("<2026-10-30T11:05:00.000Z> [Notice] <RequestLocationInventory> Player[P] requested inventory for "
+               "Location[{}] [Team_CoreGameplayFeatures][Inventory]")
+        PLACES = Places([Place(n, "Space station", "?", sys_, 0, 0, 0) for n, sys_ in (
+            ("Levski", "Nyx"), ("Pyro Gateway (Nyx)", "Nyx"), ("Lorville", "Stanton"), ("New Babbage", "Stanton"),
+            ("Grim HEX", "Stanton"), ("Seraphim Station", "Stanton"))], {})
+        PLACES.places.append(Place("HUR-L2 Faithful Dream Station", "Space station", "HUR-L2", "Stanton", 0, 0, 0))
+        PLACES.places.append(Place("Megumi Refueling", "Space station", "PYR6 L5", "Pyro", 0, 0, 0))
+        PLACES = Places(PLACES.places, {}, {"microTech": "Stanton", "Hurston": "Stanton", "Lyria": "Stanton",
+                                            "HUR-L2": "Stanton", "PYR6 L5": "Pyro", "Pyro V": "Pyro"})
+        # Planets and moons: their bodies.csv name, any case in the code.
+        self.assertEqual(heading.destination("OOC_Stanton_4_Microtech", PLACES), "microTech")
+        self.assertEqual(heading.destination("OOC_Stanton_3a_Lyria", PLACES), "Lyria")
+        self.assertIsNone(heading.destination("OOC_Pyro_4_Microtech", PLACES))  # wrong system
+        h = heading.parse(qt.format("Seraphim Station", "OOC_Stanton_1_Hurston"), PLACES)
+        self.assertEqual((h["from"], h["to"]), ("Seraphim Station", "Hurston"))
+        # LOC_RR_S1_L2 is Stanton I (Hurston) L2: in game the next jump started
+        # from "HUR-L2 Faithful Dream Station". Not Pyro I.
+        h = heading.parse(qt.format("Hurston", "LOC_RR_S1_L2"), PLACES)
+        self.assertEqual((h["from"], h["to"]), ("Hurston", "HUR-L2 Faithful Dream Station"))
+        self.assertEqual(heading.destination("RR_P6_L5", PLACES), "Megumi Refueling")
+        h = heading.parse(qt.format("Levski", "rs_ext_nyx-pyro_jp1"), PLACES)
+        self.assertEqual(h, {"from": "Levski", "to": "Pyro Gateway (Nyx)", "picked_at": 1793358000.0})
+        self.assertEqual(heading.parse(qt.format("Stanton System", "ObjectContainer_Lorville_City"), PLACES)["from"],
+                         None)  # a system is no place: from unknown
+        for code, name in (("NewBabbage_LOC", "New Babbage"), ("levski_all-001", "Levski"),
+                           ("GrimHEX_OC", "Grim HEX"), ("rs_ext_cru-leo1", "Seraphim Station")):
+            self.assertEqual(heading.destination(code, PLACES), name, code)
+        for code in ("ObjectContainer_RestStop", "MISSION_QT_Quantum_Beacon_527709515697",
+                     "NavPoint_Dynamic_863593379735", "rs_ext_nyx-castra_jp1"):
+            self.assertIsNone(heading.parse(qt.format("Lorville", code), PLACES), code)
+        # The session: a new heading, replaced by the next, gone on arrival.
+        s = SimpleNamespace(places=PLACES, heading=None, here="Levski", _gateway=lambda *a: None)
+        self.assertTrue(Session._see_heading(s, qt.format("Lorville", "ObjectContainer_RestStop")) is False)
+        self.assertTrue(Session._see_heading(s, qt.format("Levski", "rs_ext_nyx-pyro_jp1")))
+        self.assertEqual((s.heading["to"], s.heading["eta"]), ("Pyro Gateway (Nyx)", None))
+        self.assertFalse(Session._see_heading(s, inv.format("RR_JP_NyxCastra")))  # somewhere else
+        self.assertTrue(Session._see_heading(s, inv.format("RR_JP_NyxPyro")))  # arrived
+        self.assertIsNone(s.heading)
+        # Expiry: 10 min after the eta, or 30 min without one.
+        h = {"from": "Levski", "to": "Pyro Gateway (Nyx)", "picked_at": 1000.0, "eta": None}
+        self.assertFalse(heading.expired(h, 1000 + 29 * 60))
+        self.assertTrue(heading.expired(h, 1000 + 31 * 60))
+        h["eta"] = 1240.0
+        self.assertFalse(heading.expired(h, 1240 + 9 * 60))
+        self.assertTrue(heading.expired(h, 1240 + 11 * 60))
+        # In /state, and on a teammate's line.
+        state = liveserver.build_state("C2", "Levski", "log", None, 1000, heading=h)
+        self.assertEqual(state["heading"], {"from": "Levski", "to": "Pyro Gateway (Nyx)",
+                                            "pickedAt": "1970-01-01T00:16:40Z", "eta": "1970-01-01T00:20:40Z"})
+        self.assertIsNone(liveserver.build_state("C2", "Levski", "log", None, 1000)["heading"])
+        self.assertEqual(team.heading_text(state["heading"], 1000), "→ Pyro Gateway (Nyx) in 4m")
+        self.assertEqual(team.heading_text(state["heading"], 1300), "→ Pyro Gateway (Nyx) arriving")
+        self.assertEqual(team.heading_text(dict(state["heading"], eta=None)), "→ Pyro Gateway (Nyx)")
+        line = team.member_line({"name": "Bob", "state": dict(state, route=[], contracts=[])}, 1000)
+        self.assertEqual(line, "Bob · C2 · → Pyro Gateway (Nyx) in 4m · at Levski · 0 contract(s)")
+
+    def test_quantum_eta(self):
+        travel = TravelTimes(PLACES, fetch=lambda a, b: (95.0, None))
+        self.assertEqual(travel.quantum_seconds("Lorville", "Area18"), 95.0)
+        self.assertIsNone(travel.quantum_seconds("Levski", "Lorville"))  # another system: no single jump
+        bodies = Places(PLACES.places, {}, {"ArcCorp": "Stanton"})
+        planet = TravelTimes(bodies, fetch=lambda a, b: (40.0, None))
+        self.assertEqual(planet.quantum_seconds("Area18", "ArcCorp"), 40.0)  # to the centre of a planet
+        self.assertIsNone(planet.quantum_seconds("Levski", "ArcCorp"))
+        unknown = TravelTimes(PLACES, fetch=lambda a, b: (None, "no route"))
+        self.assertIsNone(unknown.quantum_seconds("Lorville", "Area18"))
+
     def test_sure(self):
         from schauling import team
         from schauling.tracker import UNKNOWN, Stop

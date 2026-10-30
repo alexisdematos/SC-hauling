@@ -64,15 +64,17 @@ BODY_FRAME_MAX_KM = 300
 
 
 class Places:
-    def __init__(self, places, bodies=None):
+    def __init__(self, places, bodies=None, body_systems=None):
         self.places = list(places)
         # Body positions in their system, km: {"Delamar": (x, y, z)}.
         self.bodies = bodies or {}
+        # System of each body (bodies.csv parentStar): {"Delamar": "Nyx"}.
+        self.body_systems = body_systems or {}
         self._by_key = {_key(p.name): p for p in self.places}
 
     @classmethod
     def load(cls, data_dir):
-        rows, bodies = [], {}
+        rows, bodies, systems = [], {}, {}
         with open(Path(data_dir) / "locations.csv", encoding="utf-8") as f:
             for r in csv.DictReader(f):
                 xyz = _xyz(r)
@@ -83,7 +85,23 @@ class Places:
                 xyz = _xyz(r)
                 if xyz:
                     bodies[r["name"]] = xyz
-        return cls(rows, bodies)
+                if r.get("parentStar"):
+                    systems[r["name"]] = r["parentStar"]
+        return cls(rows, bodies, systems)
+
+    def body(self, name, system=None):
+        """The bodies.csv name of a planet, moon or Lagrange point, any case
+        ("Microtech" -> "microTech"), or None."""
+        key = (name or "").lower()
+        for body, star in self.body_systems.items():
+            if body.lower() == key and (system is None or star.lower() == system.lower()):
+                return body
+        return None
+
+    def system_of(self, name):
+        """System of a place or a body."""
+        place = self.get(name)
+        return place.system if place else self.body_systems.get(name)
 
     def get(self, name):
         return self._by_key.get(_key(name)) if name else None

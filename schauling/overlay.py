@@ -122,6 +122,8 @@ class Overlay:
         self.session.travel.ship = self._ship()
         if self.session.here:  # the current session's log knows where we are
             self.set_start(self.session.here, "log")
+        self.session.heading_expired(time.time())  # one from the replay may be old
+        self.find_eta()
         if cfg.get("live_server", True):
             self.start_live()
         self.render()
@@ -341,6 +343,12 @@ class Overlay:
         elif self.session.ship_changed:
             self.session.ship_changed = False
             self.apply_ship()
+            self.render()
+        if self.session.heading_changed:
+            self.session.heading_changed = False
+            self.find_eta()
+            self.render()  # a new heading goes to the team
+        if self.session.heading_expired(time.time()):
             self.render()
         if self.session.place_changed:
             self.session.place_changed = False
@@ -649,6 +657,19 @@ class Overlay:
                 self.render()
         self._in_background(lambda: self.team.api.leave(t["code"], t["member"], t["secret"]), done)
 
+    def find_eta(self):
+        """Arrival time of the quantum jump picked: its travel time, on a
+        thread (the API may be asked)."""
+        h = self.session.heading
+        if not h or not h["from"] or not h["picked_at"]:
+            return
+
+        def done(seconds, _error):
+            if self.session.heading is h and seconds is not None:
+                h["eta"] = h["picked_at"] + seconds
+                self.render()
+        self._in_background(lambda: self.session.travel.quantum_seconds(h["from"], h["to"]), done)
+
     def read_team_every(self):
         self.read_team()
         self.root.after(team.READ_S * 1000, self.read_team_every)
@@ -710,7 +731,8 @@ class Overlay:
         code = self._team_code()
         self._live = team.fit_state(liveserver.build_state(
             self.session.travel.ship, self.cfg.get("start"), self._start_source, self.plan, time.time(), code,
-            team.contracts_state(self.session.tracker), (self.cfg.get("team") or {}).get("member")))
+            team.contracts_state(self.session.tracker), (self.cfg.get("team") or {}).get("member"),
+            self.session.heading))
         t = self.cfg.get("team")
         name = self.cfg.get("team_name")
         self.team.set((t["code"], t["member"], t["secret"], name) if t and name else None, self._live)

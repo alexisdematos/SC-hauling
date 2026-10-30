@@ -208,7 +208,7 @@ def shared_ids(mine, member):
     return {c.get("id") for c in (member.get("state") or {}).get("contracts") or []} & ours - {None}
 
 
-def member_line(member):
+def member_line(member, now=None):
     """Pseudo, ship, next stop and its time, number of contracts."""
     state = member.get("state") or {}
     parts = [member.get("name") or "?", state.get("ship") or "ship ?"]
@@ -219,7 +219,20 @@ def member_line(member):
     elif state.get("location"):
         parts.append(f"at {state['location']}")
     parts.append(f"{len(state.get('contracts') or [])} contract(s)")
-    return " · ".join(parts)
+    flying = heading_text(state.get("heading"), now)
+    return " · ".join(parts[:2] + ([flying] if flying else []) + parts[2:])
+
+
+def heading_text(heading, now=None):
+    """"→ Area18 in 4m", "→ Area18 arriving" once the eta is past, or
+    "→ Area18" without one."""
+    if not heading or not heading.get("to"):
+        return None
+    eta = _seconds(heading.get("eta"))
+    if eta is None:
+        return f"→ {heading['to']}"
+    left = eta - (time.time() if now is None else now)
+    return f"→ {heading['to']} " + (f"in {max(1, round(left / 60))}m" if left > 0 else "arriving")
 
 
 def contract_lines(member, shared=()):

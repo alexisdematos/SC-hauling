@@ -90,6 +90,14 @@ class TravelTimes:
         t = self._direct(a, b)
         return UNKNOWN_SECONDS if t is None else t
 
+    def quantum_seconds(self, a, b):
+        """One quantum jump from a to b in the same system, or None when
+        unknown (another system needs a jump point: never one jump)."""
+        sa, sb = self.places.system_of(a), self.places.system_of(b)
+        if not sa or sa != sb:
+            return None
+        return 0 if a == b else self._direct(a, b)  # the API knows bodies too
+
     def systems_between(self, a, b):
         """Systems the cheapest trip from a to b goes through ([Nyx, Pyro]),
         or None when both are in the same system."""
