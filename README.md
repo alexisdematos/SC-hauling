@@ -135,10 +135,12 @@ At start, SC-hauling asks the API for `/data/version`. When it changed, it downl
 
 ## Build
 
+From the SC-hauling folder (PowerShell or cmd):
+
 ```sh
 python -m venv .venv-build
-.venv-build\Scripts\python -m pip install pyinstaller
-.venv-build\Scripts\python build.py
+.\.venv-build\Scripts\python -m pip install pyinstaller
+.\.venv-build\Scripts\python build.py
 ```
 
 It copies `locations.csv`, `bodies.csv`, `quantum.json` and `ships.json` (when there) from `../SC-map/data` (or `--scmap PATH`) into the exe, and writes `dist/SC-hauling.exe` and `dist/SC-hauling-<version>-win64.zip`. Rebuild after the SC-map data changes. The version is in `schauling/__init__.py`.
