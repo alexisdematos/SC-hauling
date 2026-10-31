@@ -749,9 +749,11 @@ class Overlay:
         self.root.after(team.READ_S * 1000, self.read_team_every)
 
     def read_team(self):
-        """The others in the team, for the Team view: read only while it shows."""
+        """The others in the team: for the Team view while it shows, and to
+        fill a shared contract our log knows little of (no SCU, no cargo)."""
         t = self.cfg.get("team")
-        if not t or self.cfg.get("view") != "team" or not self._shown or self._reading_team:
+        wanted = (self.cfg.get("view") == "team" and self._shown) or self.session.tracker.missing_info()
+        if not t or not wanted or self._reading_team:
             return
         self._reading_team = True
 
@@ -762,8 +764,22 @@ class Overlay:
             self._members_error = error
             if members is not None:
                 self._members = [m for m in members if m.get("id") != t["member"]]
+                if self.fill_from_team():
+                    self.request_plan()  # SCU or pickups changed the route
             self.render()
         self._in_background(lambda: self.team.api.members(t["code"]), done)
+
+    def fill_from_team(self):
+        """Contracts a teammate has too (same id, shared in game): their copy
+        names the cargo and SCU our log lacks. True when something changed."""
+        if not team.SHARE_BY_ID:
+            return False
+        tracker, changed = self.session.tracker, 0
+        for m in self._members or []:
+            for c in (m.get("state") or {}).get("contracts") or []:
+                if c.get("id") in tracker.contracts:
+                    changed += tracker.apply_team(c["id"], c.get("cargos"), m.get("name") or "?")
+        return bool(changed)
 
     def toggle_member(self, member_id):
         self._open_members ^= {member_id}

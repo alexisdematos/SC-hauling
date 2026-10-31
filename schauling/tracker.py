@@ -30,6 +30,14 @@ _CODE_WORDS = {
     "small", "medium", "large", "bulk", "supply", "intro", "rehire", "stanton", "pyro", "nyx",
     "cfp", "hh",  # RedWind_HaulCargo_CFP_RegionLink: who the haul is for
 }
+# One commodity: HaulCargo_AToB_<kind>_<commodity>_<planet>_<size>Grade, seen
+# in game as ..._RawOre_Quartz_Stanton1_SupplyGrade and
+# ..._NonMetal_Silicon_Stanton1_SmallGrade. The cargo is the part before the
+# planet (Stanton1 = Hurston); the kind may be any word.
+_PLANET = re.compile(r"(?i)^(?:stanton|pyro|nyx)\d+[a-z]?$")
+# Redwind_Stanton_SmallGrade_Planetary_Hydrogen (seen in game, no
+# "HaulCargo"): the commodity comes last, after the grade.
+_GRADE = re.compile(r"(?i)^\w+grade\d*$")
 _ROUTE_SHAPE = re.compile(
     r"(?i)^(?:atob|(?:single|multi)\d*to(?:single|multi)\d*|linearchain|rounddelivery|regionlink)$")
 
@@ -54,11 +62,24 @@ KNOWN_ITEMS = {
 }
 
 
+def single_commodity(code):
+    """True when the code names the one commodity of every leg
+    (..._Waste_Stanton1_SmallGrade, Redwind_..._SmallGrade_Planetary_Hydrogen)."""
+    parts = (code or "").split("_")
+    return any(i > 1 and _PLANET.match(p) for i, p in enumerate(parts)) or (
+        "HaulCargo" not in parts and any(_GRADE.match(p) for p in parts[:-1]))
+
+
 def cargo_tokens(code):
     """Abbreviated cargo names from a contract code, in leg order."""
     parts = (code or "").split("_")
+    if "HaulCargo" not in parts and any(_GRADE.match(p) for p in parts[:-1]):
+        return [parts[-1]] if not _GRADE.match(parts[-1]) else []
     if not parts or parts[0].lower() != "haulcargo":
         parts = parts[parts.index("HaulCargo"):] if "HaulCargo" in parts else []
+    planet = next((i for i, p in enumerate(parts) if i > 1 and _PLANET.match(p)), None)
+    if planet is not None:
+        return [parts[planet - 1]]
     return [p for p in parts[1:]
             if p and p.lower() not in _CODE_WORDS and not _ROUTE_SHAPE.match(p) and not p.isdigit()]
 
@@ -114,6 +135,9 @@ class Leg:
     dropoff_positions: list = field(default_factory=list)
     # Cargo name read from the contract code, when the log has no objective text.
     guessed_item: str = None
+    # Pseudo of the teammate whose copy of this shared contract named the
+    # cargo and SCU (our log has no objective line for a shared contract).
+    from_team: str = None
     picked: bool = False
     delivered: bool = False
     withdrawn: bool = False
@@ -294,7 +318,9 @@ class Tracker:
         self._guess_items(c)
         names = {(l.item or l.guessed_item).lower() for l in c.legs.values() if l.item or l.guessed_item}
         tokens = cargo_tokens(c.code)
-        if len(names) + len(tokens) < len(c.legs) or not (names or tokens):
+        # One commodity for every leg (Multi4ToSingle of Waste): we know them all.
+        complete = single_commodity(c.code) and tokens
+        if not complete and (len(names) + len(tokens) < len(c.legs) or not (names or tokens)):
             return dest_fit
 
         def known(item):
@@ -310,6 +336,43 @@ class Tracker:
         if any(f is None for f, _ in fits):
             return pages[:1]
         return [p for f, p in fits if f >= PAGE_FIT]
+
+    def missing_info(self):
+        """True when an open leg has no cargo name or no SCU."""
+        return any(not leg.item or not leg.total for c in self.active() for leg in c.open_legs())
+
+    def apply_team(self, contract_id, cargos, who):
+        """A teammate's copy of a contract we have too (same id): its cargos
+        [{cargo, scu, from, to, sure}] name what our log misses. Only what we
+        lack: our own cargo names, SCU and pickups stay. Returns how many legs
+        got something."""
+        c = self.contracts.get(contract_id)
+        if c is None or self.places is None:
+            return 0
+        entries = [{"item": g["cargo"], "total": g["scu"], "dest": g.get("to"),
+                    "origin": g.get("from") if g.get("sure") != "?" else None}
+                   for g in cargos or [] if g.get("cargo") and g.get("scu")]
+        if not entries:
+            return 0
+        before = {leg.key: (leg.item, leg.total) for leg in c.legs.values()}
+        # Pickups we know already (by hand, objective text, marker) stay.
+        known = {}
+        for leg in c.legs.values():
+            stop = self._own_pickup(c, leg)
+            if stop and stop.place is not None:
+                known[self._manual_key(c, leg)] = self.manual.get(self._manual_key(c, leg))
+        self.apply_page(contract_id, entries)
+        for key, place in known.items():
+            if place is None:
+                self.manual.pop(key, None)
+            else:
+                self.manual[key] = place
+        changed = 0
+        for leg in c.legs.values():
+            if (leg.item, leg.total) != before.get(leg.key, (None, None)):
+                leg.from_team = who
+                changed += 1
+        return changed
 
     def apply_page(self, contract_id, entries):
         """Pickups (and missing cargo names) read on the contract page by OCR:
@@ -415,10 +478,13 @@ class Tracker:
         for i, leg in enumerate(legs):
             if leg.item:
                 continue
-            # Only when the code lists exactly one cargo per leg: a
-            # Multi2ToSingle "_Souv" contract carries four cargos in game.
+            # Only when the code lists exactly one cargo per leg (a
+            # Multi2ToSingle "_Souv" contract carries four cargos in game),
+            # or one commodity for all (Multi4ToSingle of Waste).
             if len(tokens) == len(legs):
                 leg.guessed_item = self._item_for(tokens[i])
+            elif single_commodity(c.code):
+                leg.guessed_item = self._item_for(tokens[0])
 
     # --- places -----------------------------------------------------------
 

@@ -26,8 +26,8 @@ READ_S = 15  # how often the Team view reads the team
 # The API refuses a PUT body over 16 KB: the state stays under this, the
 # rest is for the pseudo and the JSON around it.
 MAX_STATE = 15 * 1024
-# A contract shared in game: same MissionId in both Game.log? Not checked in
-# game yet; set False if it is not, and shared contracts are not grouped.
+# A contract shared in game keeps its MissionId in both Game.log (seen in
+# game, 2026-10-31): shared contracts are grouped, and filled from a teammate.
 SHARE_BY_ID = True
 LOCAL_ONLY = ("teamMember",)  # in the local /state, not sent to the API
 # What the API keeps at most (more contracts: refused; more cargos: cut).

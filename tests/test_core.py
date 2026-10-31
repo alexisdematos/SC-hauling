@@ -971,6 +971,19 @@ class CargoNamesTest(unittest.TestCase):
         self.assertEqual(cargo_tokens("HaulCargo_Multi2ToSingle_Interstellar_Medium_Souv"), ["Souv"])
         self.assertEqual(cargo_tokens("Iasi_HaulCargo_AtoB_Supply_SecuritySupplies"), ["SecuritySupplies"])
         self.assertEqual(cargo_tokens("FTL_Courier_Nyx_MicroSatellite_Rank0"), [])
+        # One commodity, seen in game 2026-10-31: the part before the planet.
+        self.assertEqual(cargo_tokens("HaulCargo_AToB_RawOre_Quartz_Stanton1_SupplyGrade"), ["Quartz"])
+        self.assertEqual(cargo_tokens("HaulCargo_AToB_NonMetal_Silicon_Stanton1_SmallGrade"), ["Silicon"])
+        self.assertEqual(cargo_tokens("HaulCargo_SingleToMulti3_Processed_Stims_Stanton1_SmallGrade2"), ["Stims"])
+        self.assertEqual(cargo_tokens("HaulCargo_Multi4ToSingle_Waste_Waste_Stanton1_SmallGrade"), ["Waste"])
+        # Shared by a teammate: no objective line in our log, only the code.
+        self.assertEqual(cargo_tokens("Redwind_Stanton_SmallGrade_Planetary_Hydrogen"), ["Hydrogen"])
+        # A page of Hydrogen does not fit a Multi4ToSingle of Waste, though
+        # both deliver 11 SCU to Everus Harbor (read from the menu in game).
+        from schauling.tracker import single_commodity
+        self.assertTrue(single_commodity("HaulCargo_Multi4ToSingle_Waste_Waste_Stanton1_SmallGrade"))
+        self.assertTrue(single_commodity("Redwind_Stanton_SmallGrade_Planetary_Hydrogen"))
+        self.assertFalse(single_commodity("HaulCargo_Multi2ToSingle_Interstellar_Medium_Souv"))
 
     def test_courier_hint(self):
         self.assertEqual(courier_hint("FTL_Courier_Nyx_MicroSatellite_Rank0"), ("Nyx", "Micro Satellite"))
@@ -1595,3 +1608,31 @@ class CrewTest(unittest.TestCase):
         self.assertEqual((state["handle"], state["aboard"]["owner"]), ("FritesMcCain", "Helmarok"))
         self.assertTrue(Session._see_crew(s, note.format("left the", "RSI Constellation Mk IV Phoenix", "Helmarok")))
         self.assertIsNone(s.aboard)
+
+
+class SharedContractTest(unittest.TestCase):
+    def test_filled_from_teammate(self):
+        from schauling.report import cargo_lines
+        # Shared in game: our log has the markers only, no objective line,
+        # so no SCU and a cargo guessed from the code.
+        t = Tracker(PLACES, items={})
+        code = "Redwind_Stanton_SmallGrade_Planetary_Hydrogen"
+        t.feed(marker("m20", "pickup_aa_0", code))
+        t.feed(marker("m20", "dropoff_aa_0", code))
+        [c] = t.active()
+        [leg] = c.open_legs()
+        self.assertEqual((leg.cargo, leg.total), ("~Hydrogen", 0))
+        self.assertTrue(t.missing_info())
+        theirs = [{"cargo": "Hydrogen", "scu": 11, "from": "Lorville", "to": "Area18", "sure": ""}]
+        self.assertEqual(t.apply_team("m20", theirs, "Helmarok"), 1)
+        self.assertEqual((leg.item, leg.total, leg.from_team), ("Hydrogen", 11, "Helmarok"))
+        self.assertEqual(t.pickup_of(c, leg).name, "Lorville")
+        self.assertFalse(t.missing_info())
+        self.assertIn("Lorville → Area18 : 11 SCU Hydrogen (from Helmarok)", [x for x, *_ in cargo_lines(t)])
+        # Again: nothing new. What we know stays (another pickup, other SCU).
+        self.assertEqual(t.apply_team("m20", theirs, "Helmarok"), 0)
+        t.set_pickup(c, leg, "Orison")
+        other = [{"cargo": "Gold", "scu": 99, "from": "Levski", "to": "Area18", "sure": ""}]
+        self.assertEqual(t.apply_team("m20", other, "Bob"), 0)
+        self.assertEqual((leg.item, leg.total, t.pickup_of(c, leg).name), ("Hydrogen", 11, "Orison"))
+        self.assertEqual(t.apply_team("nope", theirs, "Helmarok"), 0)

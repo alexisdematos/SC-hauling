@@ -24,7 +24,8 @@ def _mark(stop):
 def _cargo(leg):
     scu = f"{leg.total} SCU " if leg.total else ""
     # The game logs cargo names only for a contract tracked when accepted.
-    return f"{scu}{leg.cargo or 'cargo (not in log)'}"
+    by = f" (from {leg.from_team})" if getattr(leg, "from_team", None) else ""
+    return f"{scu}{leg.cargo or 'cargo (not in log)'}{by}"
 
 
 def cargo_lines(tracker):

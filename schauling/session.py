@@ -11,7 +11,7 @@ from .logsource import LogRestarted, LogSource
 from .places import Places
 from .routing import Plan, build_actions, plan
 from .ships import boarded_ship, channel_change, load_cargo, load_drives, load_ships, login_handle, piloted_class, ship_for_class
-from .tracker import Tracker
+from .tracker import PAGE_FIT, Tracker
 
 
 # Previous sessions searched for the last ship flown (short sessions, such
@@ -69,7 +69,14 @@ class Session:
             self._see_heading(line)
             self._see_place(line)
         for mission in list(self.pages):
-            if mission in self.tracker.contracts:
+            fit = self.tracker.page_fit(mission, self.pages[mission]) if mission in self.tracker.contracts else 0
+            if fit is not None and fit < PAGE_FIT and mission in self.tracker.contracts:
+                # Another contract's page, read by mistake: not again, nor
+                # the pickups it set.
+                origins = {e.get("origin") for e in self.pages.pop(mission)}
+                for key in [k for k, place in self.manual.items() if k.startswith(f"{mission}|") and place in origins]:
+                    del self.manual[key]
+            elif mission in self.tracker.contracts:
                 self.tracker.apply_page(mission, self.pages[mission])
             else:  # contract over, or from an older game session
                 del self.pages[mission]
