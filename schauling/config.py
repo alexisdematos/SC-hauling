@@ -24,6 +24,7 @@ DEFAULTS = {
     "close_with_game": True,  # quit when StarCitizen.exe closes
     "read_contract_page": True,  # OCR of the contract page when a contract is accepted
     "click_through": True,  # clicks outside the texts go to the game
+    "auto_update": True,  # the exe downloads new versions from GitHub releases
     "live_server": True,  # 127.0.0.1 server for the VerseTime map: position and route
     "live_port": 47823,
     "site_url": SITE,  # VerseTime site: map, invite links, allowed origin

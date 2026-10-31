@@ -11,7 +11,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog
 
-from . import config, keys, liveserver, ocr, team, trade, windows
+from . import config, keys, liveserver, ocr, team, trade, updater, windows
 from .pagewatch import PageWatcher
 from .picker import pick
 from .places import START_RADIUS_KM, parse_coordinates
@@ -121,7 +121,8 @@ class Overlay:
         for key, label in (("hide_outside_game", "Show only over the game"),
                            ("close_with_game", "Close when the game closes"),
                            ("read_contract_page", "Read the contract page on accept (screenshot + OCR)"),
-                           ("click_through", "Clicks go through, except on the texts")):
+                           ("click_through", "Clicks go through, except on the texts"),
+                           ("auto_update", "Update automatically (new versions on GitHub)")):
             var = self._options[key] = tk.BooleanVar(value=bool(cfg.get(key, True)))
             self.menu.add_checkbutton(label=label, variable=var,
                                       command=lambda k=key: self._toggle_option(k))
@@ -141,6 +142,7 @@ class Overlay:
             self.start_live()
         self.render()
         self.request_plan()
+        self.check_update()
         if windows.available():
             # Its own thread: screenshots the instant a contract is accepted.
             self.root.update_idletasks()
@@ -329,6 +331,28 @@ class Overlay:
         self.cfg["manual_pickups"] = self.session.manual
         config.save(self.cfg)
         self.request_plan()
+
+    def check_update(self):
+        """The exe updates itself from GitHub (menu option, on by default):
+        the new one runs from the next start, or at once with Restart."""
+        exe = updater.running_exe()
+        if not exe or not self.cfg.get("auto_update", True):
+            return
+        updater.cleanup(exe)
+
+        def done(status, _error):
+            if not status:
+                return
+            self.status = status
+            if status.startswith("Updated"):
+                self.menu.insert_command(self.menu.index("end"), label="Restart (new version ready)",
+                                         command=lambda: self.restart(exe))
+            self.render()
+        self._in_background(lambda: updater.update(exe), done)
+
+    def restart(self, exe):
+        updater.restart(exe)
+        self.quit()
 
     def quit(self):
         self.live.stop()

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "about": "Tables SC-hauling reads at start, updated without a new exe (raise version when you change one). aliases: a location or quantum destination code of the log -> its SC-map name, checked before any pattern.",
+  "aliases": {},
+  "leo": {"ARC": "Baijini Point", "CRU": "Seraphim Station", "HUR": "Everus Harbor", "MIC": "Port Tressler"},
+  "cities": {"newbabbage": "New Babbage"},
+  "space_zones": {"1902223495": "Stanton", "3184339241": "Pyro", "2627827560": "Nyx"},
+  "align_s": 15,
+  "cut_share": 0.6,
+  "zone_before_s": 30,
+  "zone_after_s": 20
+}

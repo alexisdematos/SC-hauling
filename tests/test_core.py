@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from schauling import datasync, keys
@@ -1499,3 +1500,69 @@ class TravelTimesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UpdateTest(unittest.TestCase):
+    def release(self, tag, data=b"new exe", digest=True):
+        import hashlib
+        asset = {"name": "SC-hauling.exe", "browser_download_url": "https://x/SC-hauling.exe"}
+        if digest:
+            asset["digest"] = "sha256:" + hashlib.sha256(data).hexdigest()
+        return json.dumps({"tag_name": tag, "assets": [asset]}).encode()
+
+    def test_latest(self):
+        from schauling import updater
+        self.assertEqual(updater.version_tuple("v0.2.10"), (0, 2, 10))
+        self.assertGreater(updater.version_tuple("0.10.0"), updater.version_tuple("0.9.9"))
+        self.assertIsNone(updater.latest(lambda url, t=0: self.release("v0.1.0"), "0.1.0"))  # same version
+        version, url, sha = updater.latest(lambda url, t=0: self.release("v0.2.0"), "0.1.0")
+        self.assertEqual((version, url), ("0.2.0", "https://x/SC-hauling.exe"))
+        with self.assertRaises(updater.UpdateError):  # no SHA-256: not trusted
+            updater.latest(lambda url, t=0: self.release("v0.2.0", digest=False), "0.1.0")
+
+    def test_install_swaps_and_checks(self):
+        import hashlib
+        from schauling import updater
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "SC-hauling.exe"
+            exe.write_bytes(b"old exe")
+            good = hashlib.sha256(b"new exe").hexdigest()
+            with self.assertRaises(updater.UpdateError):  # tampered download
+                updater.install(exe, "u", good, lambda url, t=0: b"evil exe")
+            self.assertEqual(exe.read_bytes(), b"old exe")
+            status = updater.update(exe, lambda url, t=0: self.release("v9.0.0") if "api.github" in url else b"new exe")
+            self.assertTrue(status.startswith("Updated to 9.0.0"), status)
+            self.assertEqual(exe.read_bytes(), b"new exe")
+            self.assertEqual((Path(d) / "SC-hauling.exe.old").read_bytes(), b"old exe")
+            updater.cleanup(exe)  # the next start, now the new exe
+            self.assertFalse((Path(d) / "SC-hauling.exe.old").exists())
+            # Its version inside is still older than the tag: not again.
+            get = lambda url, t=0: self.release("v9.0.0") if "api.github" in url else b"new exe"
+            self.assertIn("not downloaded again", updater.update(exe, get))
+
+
+class RulesTest(unittest.TestCase):
+    def test_rules(self):
+        from schauling import heading, locations, rules
+        saved = (dict(locations.ALIASES), dict(heading.SPACE_ZONES), heading.CUT_SHARE, rules.applied)
+        try:
+            bundled = rules.load()
+            self.assertTrue(rules.valid(bundled))
+            self.assertFalse(rules.valid({"version": 2, "cut_share": "0.5"}))  # wrong type: not used
+            self.assertFalse(rules.valid({"version": 2, "aliases": {"a": 1}}))
+            rules.apply(bundled)
+            newer = dict(bundled, version=bundled["version"] + 1, cut_share=0.5,
+                         aliases={"rs_ext_new_station": "Orbituary"})
+            with tempfile.TemporaryDirectory() as d, unittest.mock.patch.dict("os.environ", {"APPDATA": d}):
+                self.assertIsNone(rules.refresh(lambda url, t=0: json.dumps(bundled).encode()))  # not newer
+                self.assertEqual(rules.refresh(lambda url, t=0: json.dumps(newer).encode()),
+                                 f"rules updated to {newer['version']}")
+                self.assertEqual(rules.load()["version"], newer["version"])  # kept for the next start
+            self.assertEqual(heading.CUT_SHARE, 0.5)
+            orbituary = Places([Place("Orbituary", "Space station", "Bloom", "Pyro", 0, 0, 0)], {})
+            self.assertEqual(place_for_code("rs_ext_new_station", orbituary).name, "Orbituary")
+            self.assertEqual(heading.destination("LOC_rs_ext_new_station", orbituary), "Orbituary")
+        finally:
+            locations.ALIASES.clear(); locations.ALIASES.update(saved[0])
+            heading.SPACE_ZONES.clear(); heading.SPACE_ZONES.update(saved[1])
+            heading.CUT_SHARE, rules.applied = saved[2], saved[3]

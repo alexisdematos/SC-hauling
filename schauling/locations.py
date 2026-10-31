@@ -11,6 +11,8 @@ from .picker import matches
 
 _REQUEST = re.compile(r"<RequestLocationInventory> .*?requested inventory for Location\[(?P<code>[^\]]+)\]")
 
+# Codes of the log -> SC-map name, before any pattern (rules.json fills it).
+ALIASES = {}
 # Rest stops in low orbit: RR_<body>_LEO.
 _LEO = {"ARC": "Baijini Point", "CRU": "Seraphim Station", "HUR": "Everus Harbor", "MIC": "Port Tressler"}
 # Landing zones: Stanton<n>_<city>.
@@ -33,6 +35,8 @@ def place_for_code(code, places):
     """SC-map place for a location code, or None."""
     if not code:
         return None
+    if code in ALIASES:
+        return places.get(ALIASES[code])
     parts = code.split("_")
     if parts[0] == "RR" and len(parts) == 3 and _PYRO.fullmatch(parts[1]):
         return _pyro_station(_PYRO.fullmatch(parts[1]).group(1), parts[2], places)

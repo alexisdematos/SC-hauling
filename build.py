@@ -8,6 +8,7 @@ The exe bundles Python and the SC-map data it needs (places, bodies, ships),
 so players need nothing else. Rebuild after SC-map data changes.
 """
 import argparse
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -39,18 +40,22 @@ def main():
         sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--windowed",
         "--name", "SC-hauling",
         "--add-data", f"{data}{';' if sys.platform == 'win32' else ':'}data",
+        "--add-data", f"{ROOT / 'schauling' / 'rules.json'}{';' if sys.platform == 'win32' else ':'}schauling",
         "--distpath", str(ROOT / "dist"), "--workpath", str(ROOT / "build" / "pyinstaller"),
         "--specpath", str(ROOT / "build"),
         str(ROOT / "run_overlay.py"),
     ], check=True)
 
     exe = ROOT / "dist" / "SC-hauling.exe"
+    # For the release, next to the exe: the updater checks the download.
+    digest = hashlib.sha256(exe.read_bytes()).hexdigest()
+    (exe.parent / f"{exe.name}.sha256").write_text(f"{digest}  {exe.name}\n", encoding="ascii")
     archive = ROOT / "dist" / f"SC-hauling-{__version__}-win64.zip"
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(exe, exe.name)
         for extra in ("README.md", "LICENSE"):
             z.write(ROOT / extra, extra)
-    print(f"Built {exe} and {archive}")
+    print(f"Built {exe} ({__version__}, sha256 {digest[:12]}…) and {archive}")
 
 
 if __name__ == "__main__":

@@ -149,6 +149,20 @@ python -m venv .venv-build
 
 It copies `locations.csv`, `bodies.csv`, `quantum.json` and `ships.json` (when there) from `../SC-map/data` (or `--scmap PATH`) into the exe, and writes `dist/SC-hauling.exe` and `dist/SC-hauling-<version>-win64.zip`. Rebuild after the SC-map data changes. The version is in `schauling/__init__.py`.
 
+## Updates
+
+**The exe** (menu option *Update automatically*, on by default): at start it asks GitHub for the latest release of this repository. When the release tag (`v0.2.0`) is newer than its own version, it downloads the release's `SC-hauling.exe`, checks it against the SHA-256 GitHub gives for it (or the release's `SC-hauling.exe.sha256`), and swaps it in: Windows lets a running exe be renamed, so the old one becomes `SC-hauling.exe.old` (deleted at the next start). A download that does not match is not installed. The status line says `Updated to 0.2.0`; right-click → *Restart (new version ready)*, or it runs from the next start. Run from source, nothing is checked.
+
+**Rules** (no new exe): `schauling/rules.json` holds what changes with the game: codes of the log that patterns miss (`aliases`: code → SC-map name), low orbit stations, inventory zones of open space, the alignment time and the cut-short share of a jump. At start, a newer copy is read from this repository on GitHub (`main` branch) in the background and kept in `%APPDATA%\SC-haulingules.json`; the one with the highest `version` wins. It is data: nothing in it runs, and a file with a wrong type is ignored. To fix a code for everyone: edit `rules.json`, raise `version`, push.
+
+**Release a version**:
+
+1. Raise `__version__` in `schauling/__init__.py` (`0.2.0`) and commit.
+2. `.\.venv-build\Scripts\python build.py`: it writes `dist/SC-hauling.exe` and `dist/SC-hauling.exe.sha256`.
+3. On GitHub, *Releases → Draft a new release*, tag `v0.2.0` (the same version, or every exe downloads it again at each start), attach `SC-hauling.exe`, `SC-hauling.exe.sha256` and the zip, publish.
+
+The repository must be public: the exe and `rules.json` are read without an account.
+
 ## Tests
 
 ```sh

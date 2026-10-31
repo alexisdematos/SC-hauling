@@ -13,7 +13,7 @@ the game does not say which), mission beacons and nav points cannot.
 import re
 from datetime import datetime
 
-from .locations import place_for_code
+from .locations import ALIASES, place_for_code
 
 # The quantum drive stopped (at the destination or cut short: the game logs
 # both as "arrived"). Seen in game, Bloom to Terminus, 2026-10-31.
@@ -101,6 +101,9 @@ def destination(code, places):
 
 
 def _place(code, places):
+    for alias in (code, re.sub(r"(?i)^loc_", "", code)):
+        if alias in ALIASES:
+            return places.get(ALIASES[alias]) or places.body(ALIASES[alias])
     code = re.sub(r"(?i)^loc_", "", code)
     m = _BODY.fullmatch(code)
     if m:

@@ -1,9 +1,10 @@
 """python -m schauling [--once] [--check] [--log PATH] [--ship NAME] [--from PLACE]"""
 import argparse
 import sys
+import threading
 import time
 
-from . import config, datasync, patchcheck
+from . import config, datasync, patchcheck, rules
 from .logsource import find_log
 from .report import cargo_lines, route_lines
 from .session import Session
@@ -11,6 +12,10 @@ from .session import Session
 
 def main(argv=None):
     cfg = config.load()
+    # Codes and numbers that change with the game: the newest we have, and a
+    # newer one from GitHub in the background (data only).
+    rules.apply(rules.load())
+    threading.Thread(target=rules.refresh, daemon=True).start()
     ap = argparse.ArgumentParser(prog="schauling", description="Star Citizen hauling overlay from Game.log")
     ap.add_argument("--log", default=cfg.get("log"), help="path to Game.log")
     ap.add_argument("--scmap", default=cfg.get("scmap_data"), help="SC-map data folder")
