@@ -10,7 +10,7 @@ from .logparser import parse_line
 from .logsource import LogRestarted, LogSource
 from .places import Places
 from .routing import Plan, build_actions, plan
-from .ships import boarded_ship, load_cargo, load_drives, load_ships, piloted_class, ship_for_class
+from .ships import boarded_ship, channel_change, load_cargo, load_drives, load_ships, login_handle, piloted_class, ship_for_class
 from .tracker import Tracker
 
 
@@ -60,9 +60,12 @@ class Session:
                                titles=self.titles)
         self.here = None
         self.heading = None
+        self.handle = None
+        self.aboard = None
         for line in self.source.initial():
             self.tracker.feed(line)
             self._see_ship(line)
+            self._see_crew(line)
             self._see_heading(line)
             self._see_place(line)
         for mission in list(self.pages):
@@ -187,6 +190,26 @@ class Session:
             return True
         return False
 
+    def _see_crew(self, line):
+        """Our in-game name, and whose ship we are aboard (another player's:
+        the team map shows us with them). True when that changed."""
+        handle = login_handle(line)
+        if handle:
+            self.handle = handle
+            return False
+        change = channel_change(line)
+        if not change:
+            return False
+        act, ship, owner = change
+        if act == "joined":
+            aboard = {"owner": owner, "ship": ship} if owner != self.handle else None
+        elif self.aboard == {"owner": owner, "ship": ship}:
+            aboard = None
+        else:
+            return False
+        changed, self.aboard = aboard != self.aboard, aboard
+        return changed
+
     def _ship_in(self, line):
         if "channel" in line:
             return boarded_ship(line, self._ship_names)
@@ -223,6 +246,8 @@ class Session:
         for line in lines:
             if self._see_ship(line):
                 self.ship_changed = True
+            if self._see_crew(line):
+                self.aboard_changed = True
             if "channel" in line and boarded_ship(line, self._ship_names):
                 self.boarded = True
             if self._see_heading(line):
@@ -247,6 +272,9 @@ class Session:
     # Quantum destination: {"from", "to", "picked_at", "eta"} (unix seconds), or None.
     heading = None
     heading_changed = False
+    aboard_changed = False
+    handle = None  # our in-game name
+    aboard = None  # {"owner", "ship"}: another player's ship we are in
     _arrived = None  # where the quantum drive stopped, for _see_place on the same line
     _zone = None  # (time, into open space) of the last inventory zone change
     _stop = None  # the last quantum stop: {"at", "to", "cut"}, corrected by a zone change after it

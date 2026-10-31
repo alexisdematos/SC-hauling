@@ -381,6 +381,9 @@ class Overlay:
             self.session.ship_changed = False
             self.apply_ship()
             self.render()
+        if self.session.aboard_changed:
+            self.session.aboard_changed = False
+            self.render()  # aboard someone's ship: the team sees it
         if self.session.heading_changed:
             self.session.heading_changed = False
             self.find_eta()
@@ -803,7 +806,8 @@ class Overlay:
         self._live = team.fit_state(liveserver.build_state(
             self.session.travel.ship, self.cfg.get("start"), self._start_source, self.plan, time.time(), code,
             team.contracts_state(self.session.tracker), (self.cfg.get("team") or {}).get("member"),
-            self.session.heading))
+            # Aboard someone's ship we do not fly it: their heading counts.
+            None if self.session.aboard else self.session.heading, self.session.handle, self.session.aboard))
         t = self.cfg.get("team")
         name = self.cfg.get("team_name")
         self.team.set((t["code"], t["member"], t["secret"], name) if t and name else None, self._live)

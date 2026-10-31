@@ -13,6 +13,28 @@ _RELEASE = re.compile(r"<Vehicle Control Flow> .*?releasing control token for '(
 _BOARDED = re.compile(r"<SHUDEvent_OnNotification> Added notification \"You have joined channel '(?P<ship>.+?) : [^']*'")
 
 
+# The player's in-game name: "User Login Success - Handle[FritesMcCain]".
+_LOGIN = re.compile(r"User Login Success - Handle\[(?P<handle>[^\]]+)\]")
+# Boarding or leaving a ship joins or leaves its channel, which names the
+# owner: "You have joined channel 'RSI Constellation Mk V Centaurus :
+# FritesMcCain'", "You have left the channel '...'".
+_CHANNEL = re.compile(r"<SHUDEvent_OnNotification> Added notification \"You have (?P<act>joined|left the) "
+                      r"channel '(?P<ship>.+?) : (?P<owner>[^']+)'")
+
+
+def login_handle(line):
+    m = _LOGIN.search(line)
+    return m.group("handle") if m else None
+
+
+def channel_change(line):
+    """("joined" or "left", ship, owner) for a ship's channel, or None."""
+    m = _CHANNEL.search(line)
+    if not m:
+        return None
+    return ("joined" if m.group("act") == "joined" else "left"), m.group("ship"), m.group("owner")
+
+
 def boarded_ship(line, names):
     """Ship the player just boarded (a name from `names`), or None."""
     m = _BOARDED.search(line)

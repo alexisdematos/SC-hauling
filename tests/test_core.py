@@ -1515,6 +1515,10 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual(updater.version_tuple("v0.2.10"), (0, 2, 10))
         self.assertGreater(updater.version_tuple("0.10.0"), updater.version_tuple("0.9.9"))
         self.assertIsNone(updater.latest(lambda url, t=0: self.release("v0.1.0"), "0.1.0"))  # same version
+
+        def no_release(url, t=0):  # only a pre-release: GitHub's latest is 404
+            raise updater.UpdateError("HTTP 404", 404)
+        self.assertIsNone(updater.update(Path("SC-hauling.exe"), no_release))
         version, url, sha = updater.latest(lambda url, t=0: self.release("v0.2.0"), "0.1.0")
         self.assertEqual((version, url), ("0.2.0", "https://x/SC-hauling.exe"))
         with self.assertRaises(updater.UpdateError):  # no SHA-256: not trusted
@@ -1566,3 +1570,28 @@ class RulesTest(unittest.TestCase):
             locations.ALIASES.clear(); locations.ALIASES.update(saved[0])
             heading.SPACE_ZONES.clear(); heading.SPACE_ZONES.update(saved[1])
             heading.CUT_SHARE, rules.applied = saved[2], saved[3]
+
+
+class CrewTest(unittest.TestCase):
+    def test_aboard(self):
+        from schauling import liveserver
+        from schauling.session import Session
+        note = ("<2026-10-11T12:39:14.236Z> [Notice] <SHUDEvent_OnNotification> Added notification "
+                "\"You have {} channel '{} : {}'.")
+        s = Session.__new__(Session)
+        s.handle, s.aboard = None, None
+        login = ("<2026-10-31T16:12:54.419Z> [Notice] <Legacy login response> [CIG-net] User Login Success - "
+                 "Handle[FritesMcCain] - Time[164490931] [Team_GameServices][Login]")
+        self.assertFalse(Session._see_crew(s, login))
+        self.assertEqual(s.handle, "FritesMcCain")
+        # Our own ship: not aboard anyone's.
+        self.assertFalse(Session._see_crew(s, note.format("joined", "Argo MOLE", "FritesMcCain")))
+        self.assertIsNone(s.aboard)
+        # Helmarok's ship (seen in game, 2026-10-11), then out of it.
+        self.assertTrue(Session._see_crew(s, note.format("joined", "RSI Constellation Mk IV Phoenix", "Helmarok")))
+        self.assertEqual(s.aboard, {"owner": "Helmarok", "ship": "RSI Constellation Mk IV Phoenix"})
+        self.assertFalse(Session._see_crew(s, note.format("left the", "Kruger P-72 Archimedes", "Helmarok")))
+        state = liveserver.build_state("C2", None, "log", None, 0, handle=s.handle, aboard=s.aboard)
+        self.assertEqual((state["handle"], state["aboard"]["owner"]), ("FritesMcCain", "Helmarok"))
+        self.assertTrue(Session._see_crew(s, note.format("left the", "RSI Constellation Mk IV Phoenix", "Helmarok")))
+        self.assertIsNone(s.aboard)

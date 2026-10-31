@@ -29,7 +29,9 @@ DOWNLOAD_TIMEOUT_S = 120
 
 
 class UpdateError(Exception):
-    pass
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 def _get(url, timeout=TIMEOUT_S):
@@ -38,7 +40,7 @@ def _get(url, timeout=TIMEOUT_S):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.read()
     except urllib.error.HTTPError as e:
-        raise UpdateError(f"HTTP {e.code}") from None
+        raise UpdateError(f"HTTP {e.code}", e.code) from None
     except (OSError, ValueError) as e:
         raise UpdateError(f"no answer ({getattr(e, 'reason', None) or e})") from None
 
@@ -61,6 +63,10 @@ def latest(get=_get, current=__version__):
         release = json.loads(get(LATEST_URL))
     except ValueError:
         raise UpdateError("bad answer") from None
+    except UpdateError as e:
+        if e.status == 404:  # no release yet (pre-releases do not count)
+            return None
+        raise
     version = release.get("tag_name")
     if not version_tuple(version) or not version_tuple(current) or version_tuple(version) <= version_tuple(current):
         return None
