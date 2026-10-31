@@ -46,7 +46,8 @@ def build_state(ship, location, source, plan, now, team=None, contracts=None, te
     code of the team we share with, so the map shows it too. contracts: see
     team.contracts_state. team_member: our member id, so the map knows which
     teammate we are (local only: team.TeamSharer leaves it out of the PUT).
-    heading: the quantum destination picked last (session.heading)."""
+    heading: the quantum destination picked last (session.heading); jumpAt
+    is when the ship should start moving (pick + aligning + spool)."""
     route = []
     for stop in plan.stops if plan else []:
         route.append({
@@ -62,7 +63,8 @@ def build_state(ship, location, source, plan, now, team=None, contracts=None, te
             "contracts": contracts or [], "teamMember": team_member if team else None,
             "heading": {"from": heading["from"], "to": heading["to"],
                         "pickedAt": _iso(heading["picked_at"]) if heading.get("picked_at") else None,
-                        "eta": _iso(heading["eta"]) if heading.get("eta") else None} if heading else None}
+                        "eta": _iso(heading["eta"]) if heading.get("eta") else None,
+                        "jumpAt": _iso(heading["jump_at"]) if heading.get("jump_at") else None} if heading else None}
 
 
 class _Handler(BaseHTTPRequestHandler):

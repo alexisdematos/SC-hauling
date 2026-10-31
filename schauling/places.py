@@ -64,17 +64,19 @@ BODY_FRAME_MAX_KM = 300
 
 
 class Places:
-    def __init__(self, places, bodies=None, body_systems=None):
+    def __init__(self, places, bodies=None, body_systems=None, numbers=None):
         self.places = list(places)
         # Body positions in their system, km: {"Delamar": (x, y, z)}.
         self.bodies = bodies or {}
         # System of each body (bodies.csv parentStar): {"Delamar": "Nyx"}.
         self.body_systems = body_systems or {}
+        # Planets and moons by system and ordinal: {("pyro", "3"): "Bloom"}.
+        self.numbers = numbers or {}
         self._by_key = {_key(p.name): p for p in self.places}
 
     @classmethod
     def load(cls, data_dir):
-        rows, bodies, systems = [], {}, {}
+        rows, bodies, systems, numbers = [], {}, {}, {}
         with open(Path(data_dir) / "locations.csv", encoding="utf-8") as f:
             for r in csv.DictReader(f):
                 xyz = _xyz(r)
@@ -87,7 +89,9 @@ class Places:
                     bodies[r["name"]] = xyz
                 if r.get("parentStar"):
                     systems[r["name"]] = r["parentStar"]
-        return cls(rows, bodies, systems)
+                    if r.get("ordinal"):
+                        numbers[(r["parentStar"].lower(), r["ordinal"].lower())] = r["name"]
+        return cls(rows, bodies, systems, numbers)
 
     def body(self, name, system=None):
         """The bodies.csv name of a planet, moon or Lagrange point, any case

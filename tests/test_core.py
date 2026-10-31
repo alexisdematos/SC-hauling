@@ -548,7 +548,8 @@ class TeamTest(unittest.TestCase):
         PLACES.places.append(Place("HUR-L2 Faithful Dream Station", "Space station", "HUR-L2", "Stanton", 0, 0, 0))
         PLACES.places.append(Place("Megumi Refueling", "Space station", "PYR6 L5", "Pyro", 0, 0, 0))
         PLACES = Places(PLACES.places, {}, {"microTech": "Stanton", "Hurston": "Stanton", "Lyria": "Stanton",
-                                            "HUR-L2": "Stanton", "PYR6 L5": "Pyro", "Pyro V": "Pyro"})
+                                            "HUR-L2": "Stanton", "PYR6 L5": "Pyro", "Pyro V": "Pyro", "Bloom": "Pyro"},
+                        {("pyro", "3"): "Bloom", ("pyro", "5a"): "Ignis"})
         # Planets and moons: their bodies.csv name, any case in the code.
         self.assertEqual(heading.destination("OOC_Stanton_4_Microtech", PLACES), "microTech")
         self.assertEqual(heading.destination("OOC_Stanton_3a_Lyria", PLACES), "Lyria")
@@ -561,9 +562,25 @@ class TeamTest(unittest.TestCase):
         self.assertEqual((h["from"], h["to"]), ("Hurston", "HUR-L2 Faithful Dream Station"))
         self.assertEqual(heading.destination("RR_P6_L5", PLACES), "Megumi Refueling")
         h = heading.parse(qt.format("Levski", "rs_ext_nyx-pyro_jp1"), PLACES)
-        self.assertEqual(h, {"from": "Levski", "to": "Pyro Gateway (Nyx)", "picked_at": 1793358000.0})
+        self.assertEqual(h, {"from": "Levski", "to": "Pyro Gateway (Nyx)", "picked_at": 1793358000.0,
+                             "ship": "1"})
         self.assertEqual(heading.parse(qt.format("Stanton System", "ObjectContainer_Lorville_City"), PLACES)["from"],
                          None)  # a system is no place: from unknown
+        # Seen in game, from Nyx Gateway (Pyro) to Bloom: the planet by its number.
+        h = heading.parse(qt.format("Pyro System", "pyro3"), PLACES)
+        self.assertEqual((h["from"], h["to"]), (None, "Bloom"))
+        self.assertEqual(heading.destination("Pyro5A", PLACES), "Ignis")
+        self.assertIsNone(heading.destination("pyro9", PLACES))
+        # Pyro stations by planet number, as Stanton's by HUR, CRU...
+        PLACES.places += [Place("Orbituary", "Space station", "Bloom", "Pyro", 0, 0, 0),
+                          Place("Starlight Service Station", "Space station", "PYR3 L1", "Pyro", 0, 0, 0)]
+        for code, name in (("RR_P3_LEO", "Orbituary"), ("RR_PYR3_L1", "Starlight Service Station"),
+                           ("RR_P6_L5", "Megumi Refueling")):
+            self.assertEqual(place_for_code(code, PLACES).name, name, code)
+        self.assertEqual(heading.destination("LOC_RR_P3_LEO", PLACES), "Orbituary")
+        self.assertEqual(heading.destination("rs_ext_pyro3_leo", PLACES), "Orbituary")  # seen in game
+        self.assertEqual(heading.destination("rs_ext_pyro3_l1", PLACES), "Starlight Service Station")
+        self.assertIsNone(place_for_code("RR_P1_LEO", PLACES))  # no station there
         for code, name in (("NewBabbage_LOC", "New Babbage"), ("levski_all-001", "Levski"),
                            ("GrimHEX_OC", "Grim HEX"), ("rs_ext_cru-leo1", "Seraphim Station")):
             self.assertEqual(heading.destination(code, PLACES), name, code)
@@ -571,13 +588,114 @@ class TeamTest(unittest.TestCase):
                      "NavPoint_Dynamic_863593379735", "rs_ext_nyx-castra_jp1"):
             self.assertIsNone(heading.parse(qt.format("Lorville", code), PLACES), code)
         # The session: a new heading, replaced by the next, gone on arrival.
-        s = SimpleNamespace(places=PLACES, heading=None, here="Levski", _gateway=lambda *a: None)
+        khaos = {"speed": 250857100, "accel1": 5405143, "accel2": 8177143, "spool": 7.6, "fuelPerGm": 0.022}
+        s = SimpleNamespace(places=PLACES, heading=None, here="Levski", _gateway=lambda *a: None,
+                            drives={"Constellation": khaos}, travel=SimpleNamespace(ship="Constellation"),
+                            _zone=None, _stop=None, _arrived=None)
         self.assertTrue(Session._see_heading(s, qt.format("Lorville", "ObjectContainer_RestStop")) is False)
         self.assertTrue(Session._see_heading(s, qt.format("Levski", "rs_ext_nyx-pyro_jp1")))
         self.assertEqual((s.heading["to"], s.heading["eta"]), ("Pyro Gateway (Nyx)", None))
         self.assertFalse(Session._see_heading(s, inv.format("RR_JP_NyxCastra")))  # somewhere else
         self.assertTrue(Session._see_heading(s, inv.format("RR_JP_NyxPyro")))  # arrived
         self.assertIsNone(s.heading)
+        # The drive stops (there or cut short), or the route goes away: only
+        # for our ship. Lines from the Bloom -> Terminus test in game.
+        nav = ("<2026-10-31T11:38:59.567Z> [Notice] <{}> [ItemNavigation][CL][6220] | NOT AUTH | "
+               "RSI_Constellation_Mk5_Centaurus_{}[{}]|CSCItemNavigation::{} [Team_CGP4][QuantumTravel]")
+        arrived = ("Quantum Drive Arrived - Arrived at Final Destination",
+                   "OnQuantumDriveArrived|Quantum Drive has arrived at final destination")
+        no_route = ("Failed to get starmap route data!", "GetStarmapRouteSegmentData|No Route loaded!")
+        rerouted = ("Local Route Guard - Server Rerouted", "PostInitialize::<lambda_1>::operator ()|FinalStop=-1")
+        # The drive stopped: the heading ends, only for our ship.
+        s.heading = dict(heading.parse(qt.format("Levski", "rs_ext_nyx-pyro_jp1"), PLACES), eta=None)
+        self.assertFalse(Session._see_heading(s, nav.format(arrived[0], 2, 2, arrived[1])))  # a teammate's ship
+        self.assertTrue(Session._see_heading(s, nav.format(arrived[0], 1, 1, arrived[1])))
+        self.assertIsNone(s.heading)
+        # FinalStop=-1 then "No Route loaded" come when the jump starts (17 s
+        # after the pick, Bloom -> Terminus in game): the heading stays, the
+        # dot leaves now and arrives a flight later.
+        s.heading = dict(heading.parse(qt.format("Levski", "rs_ext_nyx-pyro_jp1"), PLACES), eta=None, jump_at=None,
+                         fuel=1142909.125)
+        self.assertFalse(Session._see_heading(s, nav.format(rerouted[0], 2, 2, rerouted[1])))
+        self.assertFalse(Session._see_heading(s, nav.format(rerouted[0], 1, 1, rerouted[1].replace("-1", "0"))))
+        self.assertTrue(Session._see_heading(s, nav.format(rerouted[0], 1, 1, rerouted[1])))
+        start = heading.line_time(nav.format(rerouted[0], 1, 1, rerouted[1]))
+        self.assertEqual(s.heading["jump_at"], start)
+        self.assertAlmostEqual(s.heading["eta"] - start, heading.flight_seconds(khaos, 1142909.125 / 0.022))
+        self.assertFalse(Session._see_heading(s, nav.format(no_route[0], 1, 1, no_route[1])))
+        self.assertIsNotNone(s.heading)
+        # Arrived: we are at the destination (a planet too).
+        s.places, s._arrived = PLACES, None
+        s.heading = dict(heading.parse(qt.format("Pyro System", "pyro3"), PLACES), eta=None)
+        line = nav.format(*arrived[:1], 1, 1, arrived[1])
+        Session._see_heading(s, line)
+        self.assertTrue(Session._see_place(s, line))
+        self.assertEqual(s.here, "Bloom")
+        # From the fuel estimate: the long jump to Terminus stopped after 12 s
+        # is cut short (in space); the short hop to Bloom after 33 s got there.
+        fuel = ("<2026-10-30T11:00:00.000Z> [Notice] <Calculate Route> [ItemNavigation][CL][1] | NOT AUTH | "
+                "DRAK_Caterpillar_1[1]|CSCItemNavigation::CalculateRoute|Successfully calculated route to pyro3 "
+                "fuel estimate {} [Team_CGP4][QuantumNavigation]")
+        stop = nav.replace("2026-10-31T11:38:59.567Z", "2026-10-30T11:00:{:02d}.000Z")
+        for amount, after, here in ((1139797.875, 12, None), (5822.26, 33, "Bloom")):
+            s.here = "Levski"
+            Session._see_heading(s, qt.format("Pyro System", "pyro3"))
+            Session._see_heading(s, fuel.format(amount))
+            self.assertEqual(s.heading["fuel"], amount)
+            line = stop.format(after, arrived[0], 1, 1, arrived[1])
+            Session._see_heading(s, line)
+            self.assertTrue(Session._see_place(s, line))
+            self.assertEqual(s.here, here, amount)
+        # The inventory zone decides over the time: into Bloom's zone 3 s after
+        # a stop that looked too early (waited before the jump): there; into
+        # Pyro's open space just before a stop that looked long enough: cut.
+        zone = ("<2026-10-30T11:00:{:02d}.000Z> [Notice] <Update Inventory Location> Player [P] is changing "
+                "location. Landing [1] -> [0]. Location [{}] -> [{}]. Pending [0] [Team_CoreGameplayFeatures][Inventory]")
+        s.here, s._zone, s._stop = "Levski", None, None
+        Session._see_heading(s, qt.format("Pyro System", "pyro3"))
+        Session._see_heading(s, fuel.format(1139797.875))
+        line = stop.format(12, arrived[0], 1, 1, arrived[1])
+        Session._see_heading(s, line)
+        Session._see_place(s, line)
+        self.assertIsNone(s.here)  # 12 s of a 269 s jump: cut, by the time
+        self.assertTrue(Session._see_place(s, zone.format(15, 3184339241, 1299866756)))
+        self.assertEqual(s.here, "Bloom")
+        s.here = "Levski"
+        Session._see_heading(s, qt.format("Pyro System", "pyro3"))
+        Session._see_heading(s, fuel.format(5822.26))
+        self.assertFalse(Session._see_place(s, zone.format(30, 1299866756, 3184339241)))
+        line = stop.format(33, arrived[0], 1, 1, arrived[1])
+        Session._see_heading(s, line)
+        Session._see_place(s, line)
+        self.assertIsNone(s.here)  # long enough, but out into open space 3 s before
+        s._zone = s._stop = None
+        # The length of the jump: fuel / fuelPerGm is the distance (Bloom ->
+        # Terminus: 51.95 Gm), then the drive's flight. Jumps that went to the
+        # end in game: Levski 112 s, Magnus 418 s.
+        self.assertAlmostEqual(1142935 / khaos["fuelPerGm"] / 1e6, 51.95, places=2)
+        self.assertAlmostEqual(heading.jump_seconds(260555, khaos), 112, delta=5)
+        self.assertAlmostEqual(heading.jump_seconds(1940251, khaos), 418, delta=5)
+        self.assertIsNone(heading.jump_seconds(260555, None))  # ship without drive data
+        s.here = None
+        Session._see_heading(s, qt.format("Pyro System", "pyro3"))
+        self.assertTrue(Session._see_heading(s, fuel.format(666328.4375)))
+        self.assertAlmostEqual(s.heading["eta"] - s.heading["picked_at"], 182, delta=5)
+        self.assertAlmostEqual(s.heading["jump_at"] - s.heading["picked_at"], 15 + 7.6, places=3)
+        s.heading = None
+        # A route from a planet: we are near it.
+        s.here = "Levski"
+        self.assertTrue(Session._see_place(s, qt.format("Bloom", "pyro6")))
+        self.assertEqual(s.here, "Bloom")
+        s.places = Places(PLACES.places, PLACES.bodies, PLACES.body_systems, PLACES.numbers)  # with Orbituary
+        s.here = "Orbituary"  # in orbit of Bloom: the game says "Bloom", we keep the station
+        self.assertFalse(Session._see_place(s, qt.format("Bloom", "pyro6")))
+        self.assertEqual(s.here, "Orbituary")
+        s.heading = None
+        # From "Pyro System" (open space): the place we just left.
+        s.here = "Nyx Gateway (Pyro)"
+        self.assertTrue(Session._see_heading(s, qt.format("Pyro System", "pyro3")))
+        self.assertEqual((s.heading["from"], s.heading["to"]), ("Nyx Gateway (Pyro)", "Bloom"))
+        s.heading = None
         # Expiry: 10 min after the eta, or 30 min without one.
         h = {"from": "Levski", "to": "Pyro Gateway (Nyx)", "picked_at": 1000.0, "eta": None}
         self.assertFalse(heading.expired(h, 1000 + 29 * 60))
@@ -588,7 +706,11 @@ class TeamTest(unittest.TestCase):
         # In /state, and on a teammate's line.
         state = liveserver.build_state("C2", "Levski", "log", None, 1000, heading=h)
         self.assertEqual(state["heading"], {"from": "Levski", "to": "Pyro Gateway (Nyx)",
-                                            "pickedAt": "1970-01-01T00:16:40Z", "eta": "1970-01-01T00:20:40Z"})
+                                            "pickedAt": "1970-01-01T00:16:40Z", "eta": "1970-01-01T00:20:40Z",
+                                            "jumpAt": None})
+        h["jump_at"] = 1000 + 15 + 7.6
+        self.assertEqual(liveserver.build_state("C2", "Levski", "log", None, 1000, heading=h)["heading"]["jumpAt"],
+                         "1970-01-01T00:17:02Z")
         self.assertIsNone(liveserver.build_state("C2", "Levski", "log", None, 1000)["heading"])
         self.assertEqual(team.heading_text(state["heading"], 1000), "→ Pyro Gateway (Nyx) in 4m")
         self.assertEqual(team.heading_text(state["heading"], 1300), "→ Pyro Gateway (Nyx) arriving")

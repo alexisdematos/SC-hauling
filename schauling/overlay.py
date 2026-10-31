@@ -526,7 +526,7 @@ class Overlay:
         """Start the route at `name`; `source` says where we got it."""
         self._start_source = "showlocation" if source.startswith("/showlocation") else "log"
         self.cfg["start"] = self.session.start = name
-        self.status = f"Start: {name} ({source})"
+        self.status = f"Start: {name} ({source})" if name else "In space: quantum stopped on the way"
         config.save(self.cfg)
 
     def request_plan(self):
@@ -708,11 +708,11 @@ class Overlay:
         """Arrival time of the quantum jump picked: its travel time, on a
         thread (the API may be asked)."""
         h = self.session.heading
-        if not h or not h["from"] or not h["picked_at"]:
-            return
+        if not h or not h["from"] or not h["picked_at"] or h.get("eta"):
+            return  # an eta already: from the fuel estimate, better
 
         def done(seconds, _error):
-            if self.session.heading is h and seconds is not None:
+            if self.session.heading is h and seconds is not None and not h.get("eta"):
                 h["eta"] = h["picked_at"] + seconds
                 self.render()
         self._in_background(lambda: self.session.travel.quantum_seconds(h["from"], h["to"]), done)

@@ -34,6 +34,18 @@ def load_ships(data_dir):
     return sorted({s["name"] for s in data.get("ships", [])})
 
 
+def load_drives(data_dir):
+    """{ship name: its quantum drive (speed, accel1, accel2, spool,
+    fuelPerGm)} from SC-map's quantum.json; {} without it."""
+    try:
+        data = json.loads((Path(data_dir) / "quantum.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    drives = data.get("drives") or []
+    drives = {d["id"]: d for d in drives} if isinstance(drives, list) else drives
+    return {s["name"]: drives[s["drive"]] for s in data.get("ships", []) if s.get("drive") in drives}
+
+
 def load_cargo(data_dir):
     """{ship name: cargo SCU} from SC-map's ships.json; {} without it."""
     try:

@@ -34,6 +34,8 @@ def place_for_code(code, places):
     if not code:
         return None
     parts = code.split("_")
+    if parts[0] == "RR" and len(parts) == 3 and _PYRO.fullmatch(parts[1]):
+        return _pyro_station(_PYRO.fullmatch(parts[1]).group(1), parts[2], places)
     if parts[0] == "RR" and len(parts) == 3:
         body, spot = parts[1], parts[2]
         if spot == "LEO":
@@ -55,6 +57,21 @@ def place_for_code(code, places):
     query = _split_camel(name)
     hits = matches(query, _items(places)) or matches(re.sub(r"(?<=[A-Za-z])(?=\d)", " ", name), _items(places))
     return _only(hits, places)
+
+
+# Pyro planets by number, as Stanton's go by HUR, CRU...: RR_P3_LEO,
+# RR_PYR3_L1, RR_Pyro3_LEO. Not seen in a log yet: Stanton's pattern.
+_PYRO = re.compile(r"(?i)(?:p|pyr|pyro)(\d)")
+
+
+def _pyro_station(n, spot, places):
+    """The one station in low orbit of Pyro planet n (LEO: Orbituary for
+    Bloom), or at its Lagrange point (L1: Starlight Service Station)."""
+    planet = getattr(places, "numbers", {}).get(("pyro", n))
+    m = re.fullmatch(r"(?i)L(\d)", spot)
+    body = f"PYR{n} L{m.group(1)}" if m else planet if spot.upper() == "LEO" else None
+    stations = [p for p in places.places if body and p.body == body and p.type.lower() == "space station"]
+    return stations[0] if len(stations) == 1 else None
 
 
 def _items(places, type_=None):
