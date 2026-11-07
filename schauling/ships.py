@@ -22,6 +22,33 @@ _CHANNEL = re.compile(r"<SHUDEvent_OnNotification> Added notification \"You have
                       r"channel '(?P<ship>.+?) : (?P<owner>[^']+)'")
 
 
+# The game server we are on, in two log lines:
+#   <Join PU> address[104.155.89.51] port[64326] shard[pub_euw1b_12881860_150] locationId[...]
+#   <Update Shard Id> New Shard Id: pub_euw1b_12881860_150. Old Shard Id [...]
+# The id is empty when we leave a server ("New Shard Id: . Old Shard Id pub_...").
+_SHARD_UPDATE = re.compile(r"<Update Shard Id> New Shard Id: (?P<id>[\w-]*)\.")
+_SHARD_JOIN = re.compile(r"<Join PU> .*?shard\[(?P<id>[\w-]+)\]")
+
+
+def shard_change(line):
+    """The shard id this line says we are on ("" when we left one), or None when the line says nothing about it."""
+    if "hard" not in line:
+        return None
+    m = _SHARD_UPDATE.search(line) or _SHARD_JOIN.search(line)
+    return m.group("id") if m else None
+
+
+# The player's own navigation lines name the ship they pilot (Mustang Alpha has no comms channel to join):
+#   | NOT AUTH | CNOU_Mustang_Alpha_915833318240[915833318240]|CSCItemNavigation::CalculateRoute|...
+_NAVIGATION = re.compile(r"\| (?:NOT AUTH \| )?(?P<cls>[A-Za-z0-9_]+?)_(?P<id>\d+)\[\d+\]\|CSCItemNavigation::")
+
+
+def navigated_ship(line):
+    """(entity class, entity id) of the ship a navigation line is about, or None."""
+    m = _NAVIGATION.search(line)
+    return (m.group("cls"), m.group("id")) if m else None
+
+
 def login_handle(line):
     m = _LOGIN.search(line)
     return m.group("handle") if m else None

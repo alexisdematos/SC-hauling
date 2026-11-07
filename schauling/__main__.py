@@ -1,5 +1,6 @@
 """python -m schauling [--once] [--check] [--log PATH] [--ship NAME] [--from PLACE]"""
 import argparse
+import os
 import sys
 import threading
 import time
@@ -25,13 +26,18 @@ def main(argv=None):
     ap.add_argument("--watch", action="store_true", help="print to the console on each change")
     ap.add_argument("--live-port", type=int, default=cfg.get("live_port"),
                     help="port of the local server for the VerseTime map (127.0.0.1 only)")
+    ap.add_argument("--service", action="store_true",
+                    help="no window: the engine and its local API for the SC-overlay window (needs --port, --token)")
+    ap.add_argument("--port", type=int, help="service: port of the local API (127.0.0.1)")
+    ap.add_argument("--token", default=os.environ.get("SC_OVERLAY_TOKEN"), help="service: secret of /ui, /events, /action")
+    ap.add_argument("--parent-pid", type=int, help="service: stop when this process ends")
     ap.add_argument("--check", action="store_true",
                     help="check that the log lines and global.ini templates we read are still there, then exit")
     args = ap.parse_args(argv)
     # The Windows console defaults to cp1252, which has no arrows.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    console = args.once or args.watch or args.check
+    console = args.once or args.watch or args.check or args.service
 
     log = find_log(args.log)
     if (not log or not log.is_file()) and not console:
@@ -81,6 +87,15 @@ def main(argv=None):
             while not session.update():
                 time.sleep(1)
             print("-" * 40)
+
+    if args.service:
+        if not args.port or not args.token:
+            sys.exit("--service needs --port and --token")
+        from .service import serve
+
+        cfg["ship"], cfg["start"] = args.ship, args.start
+        serve(session, cfg, args.port, args.token, args.parent_pid, warnings=fresh)
+        return
 
     from .overlay import Overlay
 

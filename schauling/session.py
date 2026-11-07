@@ -6,11 +6,13 @@ from pathlib import Path
 from . import config, heading, titles
 from .api import TravelTimes, local_times
 from .locations import location_code, place_for_code
+from .detours import MAX_VIA
 from .logparser import parse_line
 from .logsource import LogRestarted, LogSource
 from .places import Places
 from .routing import Plan, build_actions, plan
-from .ships import boarded_ship, channel_change, load_cargo, load_drives, load_ships, login_handle, piloted_class, ship_for_class
+from .ships import (boarded_ship, channel_change, load_cargo, load_drives, load_ships, login_handle,
+                    navigated_ship, piloted_class, shard_change, ship_for_class)
 from .tracker import PAGE_FIT, Tracker
 
 
@@ -62,10 +64,12 @@ class Session:
         self.heading = None
         self.handle = None
         self.aboard = None
+        self.shard = None
         for line in self.source.initial():
             self.tracker.feed(line)
             self._see_ship(line)
             self._see_crew(line)
+            self._see_shard(line)
             self._see_heading(line)
             self._see_place(line)
         for mission in list(self.pages):
@@ -132,6 +136,16 @@ class Session:
                               if drive and new.get("picked_at") else None)
             self.heading = new
             self._stop = None  # a new route: the last stop is settled
+            return True
+        if self.heading and heading.picked_unnamed(line):
+            self.heading = None  # a destination with no SC-map name: not the old one, which would show wrongly
+            return True
+        around = heading.detour(line, self.heading) if self.heading else None
+        if around:
+            # The stops the game adds to get past a planet: the ones before the destination, in order.
+            detours = self.heading.setdefault("detours", [])
+            if around not in detours and len(detours) < MAX_VIA:
+                detours.append(around)
             return True
         if self.heading and not self.heading.get("fuel"):
             self.heading["fuel"] = heading.fuel(line, self.heading)
@@ -217,9 +231,20 @@ class Session:
         changed, self.aboard = aboard != self.aboard, aboard
         return changed
 
+    def _see_shard(self, line):
+        """The game server we are on (None when we left it). True when that changed."""
+        found = shard_change(line)
+        if found is None:
+            return False
+        changed, self.shard = (found or None) != self.shard, found or None
+        return changed
+
     def _ship_in(self, line):
         if "channel" in line:
             return boarded_ship(line, self._ship_names)
+        if "CSCItemNavigation" in line:
+            nav = navigated_ship(line)
+            return ship_for_class(nav[0], self.ships) if nav else None
         cls = piloted_class(line)
         return ship_for_class(cls, self.ships) if cls else None
 
@@ -255,6 +280,8 @@ class Session:
                 self.ship_changed = True
             if self._see_crew(line):
                 self.aboard_changed = True
+            if self._see_shard(line):
+                self.shard_changed = True
             if "channel" in line and boarded_ship(line, self._ship_names):
                 self.boarded = True
             if self._see_heading(line):
@@ -280,6 +307,8 @@ class Session:
     heading = None
     heading_changed = False
     aboard_changed = False
+    shard = None  # the game server we are on (Game.log), e.g. "pub_euw1b_12881860_150"
+    shard_changed = False
     handle = None  # our in-game name
     aboard = None  # {"owner", "ship"}: another player's ship we are in
     _arrived = None  # where the quantum drive stopped, for _see_place on the same line

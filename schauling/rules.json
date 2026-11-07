@@ -1,7 +1,8 @@
 {
-  "version": 1,
+  "version": 4,
   "about": "Tables SC-hauling reads at start, updated without a new exe (raise version when you change one). aliases: a location or quantum destination code of the log -> its SC-map name, checked before any pattern.",
-  "aliases": {},
+  "aliases": {"rayari_cluster_001_frost_{ABAB3D3F-FD7B-4CC7-88E4-10C9D39827E8}.socpak": "Deakins Research Outpost", "OOC_Stanton_1a_Ariel": "Arial",
+    "indy_miner_001_frost_{31E3882D-1E08-48A2-B8A3-035BA38E51D2}.socpak": "Benson Mining Outpost"},
   "leo": {"ARC": "Baijini Point", "CRU": "Seraphim Station", "HUR": "Everus Harbor", "MIC": "Port Tressler"},
   "cities": {"newbabbage": "New Babbage"},
   "space_zones": {"1902223495": "Stanton", "3184339241": "Pyro", "2627827560": "Nyx"},

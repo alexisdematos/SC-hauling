@@ -13,6 +13,7 @@ the game does not say which), mission beacons and nav points cannot.
 import re
 from datetime import datetime
 
+from .detours import MAX_VIA
 from .locations import ALIASES, place_for_code
 
 # The quantum drive stopped (at the destination or cut short: the game logs
@@ -134,6 +135,17 @@ def _place(code, places):
     return places.get(name) or places.resolve(name)
 
 
+_SURFACE = re.compile(r"^(?P<name>\w+?)_\{[0-9A-Fa-f-]+\}\.socpak$")
+
+
+def unnamed_outpost(code):
+    """A label for an outpost the log gives only as a file name ("indy_miner_001_frost_{GUID}.socpak"), so the
+    destination shows instead of nothing: "Unnamed outpost (indy_miner_001_frost)". None for any other code.
+    Name it in rules.json (aliases) once you know which one it is."""
+    m = _SURFACE.match(code)
+    return f"Unnamed outpost ({m.group('name')})" if m else None
+
+
 def parse(line, places, gateway=None):
     """{"from", "to", "picked_at"} for a quantum route line, or None (other
     line, or a destination with no SC-map name). gateway(name, code): the
@@ -141,13 +153,35 @@ def parse(line, places, gateway=None):
     m = _QT.search(line)
     if not m:
         return None
-    to = destination(m.group(2), places)
+    to = destination(m.group(2), places) or unnamed_outpost(m.group(2))
     if not to:
         return None
     start = places.resolve(m.group(1)) or (gateway(m.group(1), m.group(2)) if gateway else None)
     start = start.name if start else places.body(m.group(1))  # "Hurston", "Crusader": a planet
     ship = _SHIP.search(line)
     return {"from": start, "to": to, "picked_at": line_time(line), "ship": ship.group(1) if ship else None}
+
+
+# The game goes around a planet that is in the way and says so, once per detour (seen in game, HUR-L2 to Deakins on Yela):
+#   ...|ProcessNextNodeForRouteRecursive|Found obsruction while routing from Crusader to Yela Routing around Obstructing Entity OOC_Stanton_2_Crusader
+#   ...|ProcessNextNodeForRouteRecursive|Found obsruction while routing from OM-1 to Yela Routing around Obstructing Entity OOC_Stanton_2_Crusader
+# Each detour adds one OM point (of the planet in the way) after its "from". The log never gives its real number: a
+# second detour starts "from OM-1" whatever the point (the panel said Crusader, OM-6, OM-3, Cellin for
+# FinalStop=3 and two detours, the log "Crusader to Cellin" then "OM-1 to Cellin").
+_DETOUR = re.compile(r"ProcessNextNodeForRouteRecursive\|Found obsruction while routing from (.+?) to (.+?) "
+                     r"Routing around Obstructing Entity (\S+)")
+
+
+def detour(line, heading):
+    """(from, to, planet in the way) of a "routing around" line of this heading's ship, or None."""
+    m = _DETOUR.search(line)
+    return (m.group(1), m.group(2), m.group(3)) if m and _ours(line, heading) else None
+
+
+def picked_unnamed(line):
+    """True for a route line whose destination we cannot name (an outpost on a moon:
+    "rayari_cluster_001_frost_{GUID}.socpak"). The route before is no longer the one flown."""
+    return bool(_QT.search(line))
 
 
 def _ours(line, heading):

@@ -98,11 +98,43 @@ def game_running():
 
 def exclude_from_capture(hwnd, on):
     """Leave our window out of screenshots (Windows 10 2004+), or put it back."""
+    if not hwnd:  # no window of ours to hide (headless service)
+        return
     WDA_NONE, WDA_EXCLUDEFROMCAPTURE = 0x0, 0x11
     try:
         ctypes.windll.user32.SetWindowDisplayAffinity(wintypes.HWND(hwnd), WDA_EXCLUDEFROMCAPTURE if on else WDA_NONE)
     except (AttributeError, OSError):
         pass
+
+
+def clipboard_text():
+    """Text on the clipboard, or None (empty, not text, or held by another program). Read-only."""
+    if not available():
+        return None
+    CF_UNICODETEXT = 13
+    user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.GetClipboardData.argtypes = [wintypes.UINT]
+    user32.GetClipboardData.restype = wintypes.HANDLE
+    kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    if not user32.OpenClipboard(None):
+        return None
+    try:
+        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        if not handle:
+            return None
+        pointer = kernel32.GlobalLock(handle)
+        if not pointer:
+            return None
+        try:
+            return ctypes.wstring_at(pointer)
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
 
 
 def game_window():
@@ -142,6 +174,15 @@ def set_click_through(hwnd, on):
     new = (style | WS_EX_LAYERED | WS_EX_TRANSPARENT) if on else (style & ~WS_EX_TRANSPARENT)
     if new != style:
         user32.SetWindowLongW(wintypes.HWND(hwnd), GWL_EXSTYLE, new)
+
+
+def bring_to_front(hwnd):
+    """Make one of our own windows the active one (keyboard focus), e.g. a dialog opened while the game is in
+    front. Only our windows are touched: nothing is sent to the game."""
+    user32 = ctypes.windll.user32
+    user32.ShowWindow(wintypes.HWND(hwnd), 5)  # SW_SHOW
+    user32.BringWindowToTop(wintypes.HWND(hwnd))
+    user32.SetForegroundWindow(wintypes.HWND(hwnd))
 
 
 def mouse_button_down():

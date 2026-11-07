@@ -537,6 +537,7 @@ class TeamTest(unittest.TestCase):
     def test_heading(self):
         from types import SimpleNamespace
         from schauling import heading, liveserver, team
+        from schauling.detours import via_stops
         from schauling.session import Session
         qt = ("<2026-10-30T11:00:00.000Z> [Notice] <Calculate Route> [ItemNavigation][CL][1] | NOT AUTH | "
               "DRAK_Caterpillar_1[1]|CSCItemNavigation::CalculateRoute|Projected Start Location is {} for route "
@@ -598,6 +599,12 @@ class TeamTest(unittest.TestCase):
         self.assertEqual((s.heading["to"], s.heading["eta"]), ("Pyro Gateway (Nyx)", None))
         self.assertFalse(Session._see_heading(s, inv.format("RR_JP_NyxCastra")))  # somewhere else
         self.assertTrue(Session._see_heading(s, inv.format("RR_JP_NyxPyro")))  # arrived
+        self.assertIsNone(s.heading)
+        # An outpost with no SC-map name (seen in game): the old route is gone, not shown as if still flown
+        self.assertTrue(Session._see_heading(s, qt.format("Levski", "rs_ext_nyx-pyro_jp1")))
+        self.assertTrue(Session._see_heading(s, qt.format("Lorville", "rayari_cluster_001_frost_{AB12-34}.socpak")))
+        self.assertEqual(s.heading["to"], "Unnamed outpost (rayari_cluster_001_frost)")  # shown, not hidden
+        self.assertTrue(Session._see_heading(s, qt.format("Lorville", "ObjectContainer_RestStop")))  # a code with no label at all
         self.assertIsNone(s.heading)
         # The drive stops (there or cut short), or the route goes away: only
         # for our ship. Lines from the Bloom -> Terminus test in game.
@@ -697,6 +704,25 @@ class TeamTest(unittest.TestCase):
         self.assertTrue(Session._see_heading(s, qt.format("Pyro System", "pyro3")))
         self.assertEqual((s.heading["from"], s.heading["to"]), ("Nyx Gateway (Pyro)", "Bloom"))
         s.heading = None
+        # Stops the game adds to get past a planet (seen in game, HUR-L2 to Deakins on Yela): the "from" of each
+        # "routing around" line and the last "to", in order; the other ship's lines and the first line of a pair do not count.
+        s.here = "HUR-L2 Faithful Dream Station"
+        self.assertTrue(Session._see_heading(s, qt.format("HUR-L2 Faithful Dream Station", "OOC_Stanton_1_Hurston")))
+        s.heading["ship"] = "42"
+        around = ("<2026-10-30T11:00:00.000Z> [Notice] <Found Obstruction while Routing - Routing Around> [ItemNavigation][CL][1] | NOT AUTH | "
+                  "DRAK_Caterpillar_{ship}[{ship}]|CSCItemNavigation::ProcessNextNodeForRouteRecursive|Found obsruction while routing "
+                  "from {a} to {b} Routing around Obstructing Entity OOC_Stanton_2_Crusader [Team_CGP4][QuantumTravel]")
+        first = around.replace(" Routing around", "")
+        self.assertFalse(Session._see_heading(s, first.format(ship="42", a="Crusader", b="Yela")))
+        self.assertTrue(Session._see_heading(s, around.format(ship="42", a="Crusader", b="Yela")))
+        self.assertTrue(Session._see_heading(s, around.format(ship="42", a="OM-1", b="Yela")))
+        self.assertFalse(Session._see_heading(s, around.format(ship="99", a="OM-2", b="Yela")))  # another ship
+        # Each detour adds an OM point; the log's "OM-1" is no real number (seen in game: Crusader, OM-6, OM-3, Cellin)
+        self.assertEqual(liveserver.heading_via(s.heading), ["Crusader", "OM point (Crusader)", "OM point (Crusader)", "Yela"])
+        self.assertEqual(via_stops([("Crusader", "Yela", "OOC_Stanton_2_Crusader")]),
+                         ["Crusader", "OM point (Crusader)", "Yela"])  # seen in game: Crusader, OM-6, Yela
+        self.assertEqual(via_stops([]), [])
+        s.heading = None
         # Expiry: 10 min after the eta, or 30 min without one.
         h = {"from": "Levski", "to": "Pyro Gateway (Nyx)", "picked_at": 1000.0, "eta": None}
         self.assertFalse(heading.expired(h, 1000 + 29 * 60))
@@ -708,7 +734,7 @@ class TeamTest(unittest.TestCase):
         state = liveserver.build_state("C2", "Levski", "log", None, 1000, heading=h)
         self.assertEqual(state["heading"], {"from": "Levski", "to": "Pyro Gateway (Nyx)",
                                             "pickedAt": "1970-01-01T00:16:40Z", "eta": "1970-01-01T00:20:40Z",
-                                            "jumpAt": None})
+                                            "jumpAt": None, "via": []})
         h["jump_at"] = 1000 + 15 + 7.6
         self.assertEqual(liveserver.build_state("C2", "Levski", "log", None, 1000, heading=h)["heading"]["jumpAt"],
                          "1970-01-01T00:17:02Z")
@@ -1378,6 +1404,31 @@ class TradeTest(unittest.TestCase):
         from schauling.trade import free_space
         # Leaving A: 6 + 24 aboard; leaving B: 24; leaving C: none.
         self.assertEqual(free_space(self.route(), 46), [16, 22, 46])
+
+    def test_why_empty_says_what_blocks(self):
+        from schauling.trade import why_empty
+        pair = {"A": [self.good("Agricium", buy=2500)], "C": [self.good("Agricium", sell=2780)]}
+        self.assertEqual(why_empty(None, 46, pair, 10 ** 6), "No route yet")
+        self.assertIn("ship", why_empty(self.route(), None, pair, 10 ** 6))
+        self.assertIn("No prices", why_empty(self.route(), 46, {}, 10 ** 6))
+        self.assertIn("A, B, C", why_empty(self.route(), 46, {"A": [], "B": [], "C": []}, 10 ** 6))
+        # one stop with prices is not a trade (outposts have no goods terminal)
+        self.assertIn("Only A", why_empty(self.route(), 46, {"A": pair["A"], "B": [], "C": []}, 10 ** 6))
+        # the same trade, but the money is short, or never set
+        self.assertIn("Budget too low", why_empty(self.route(), 46, pair, 1000))
+        self.assertIn("No budget", why_empty(self.route(), 46, pair, None))
+        # prices there, but no profit
+        loss = {"A": [self.good("Agricium", buy=2500)], "C": [self.good("Agricium", sell=2400)]}
+        self.assertIn("No good is bought", why_empty(self.route(), 46, loss, 10 ** 6))
+        # a trade that exists but earns too little: says how much, and the free space
+        small = {"A": [self.good("Agricium", buy=2500)], "C": [self.good("Agricium", sell=2510)]}
+        message = why_empty(self.route(), 46, small, 10 ** 6)
+        self.assertIn("earns 160", message)
+        self.assertIn("16 SCU Agricium", message)
+        self.assertIn("free space is 22 SCU at most", message)  # 16 leaving A, 22 leaving B
+        # a full hold: 24 SCU ship, 30 SCU aboard leaving A and 24 leaving B
+        both = {"A": pair["A"], "B": [self.good("Gold", sell=1)], "C": pair["C"]}
+        self.assertIn("hold is full", why_empty(self.route(), 24, both, 10 ** 6))
 
     def test_simple_pair(self):
         from schauling.report import route_lines

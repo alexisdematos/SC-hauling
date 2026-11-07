@@ -63,7 +63,7 @@ def _limit(value):
     return float("inf") if value is None else value
 
 
-def suggest(plan, capacity, prices, budget, illegal=False, now=None, limit=LIMIT):
+def suggest(plan, capacity, prices, budget, illegal=False, now=None, limit=LIMIT, min_profit=MIN_PROFIT):
     """Best trades on the route, greedy: the one that earns most, then its
     space, money, stock and demand are taken, and again. prices: {place:
     [{name, buy, sell, stockBuy, demandSell, containerSizes, illegal,
@@ -93,7 +93,7 @@ def suggest(plan, capacity, prices, budget, illegal=False, now=None, limit=LIMIT
                             stock.get((a.place, name), _limit(c.get("stockBuy"))),
                             demand.get((stops[j].place, name), _limit(d.get("demandSell"))))
                     q = _fit(q, c.get("containerSizes"))
-                    if q <= 0 or (d["sell"] - c["buy"]) * q < MIN_PROFIT:
+                    if q <= 0 or (d["sell"] - c["buy"]) * q < min_profit:
                         continue
                     t = Trade(i, j, name, q, c["buy"], d["sell"])
                     if best is None or t.profit > best.profit:
@@ -111,6 +111,38 @@ def suggest(plan, capacity, prices, budget, illegal=False, now=None, limit=LIMIT
         stock[(a, name)] = stock.get((a, name), _limit(by_place[a][name].get("stockBuy"))) - best.scu
         demand[(b, name)] = demand.get((b, name), _limit(by_place[b][name].get("demandSell"))) - best.scu
     return out
+
+
+def why_empty(plan, capacity, prices, budget, illegal=False):
+    """Why there is nothing to suggest, in a short text for the player. Called when `suggest` gave nothing (or was not
+    asked: no route, no ship)."""
+    stops = plan.stops if plan else []
+    if not stops:
+        return "No route yet"
+    if not capacity:
+        return "Cargo size unknown: pick your ship"
+    if len(stops) < 2:
+        return "The route has a single stop"
+    places = list(dict.fromkeys(s.place for s in stops))
+    missing = [p for p in places if not (prices or {}).get(p)]
+    if len(missing) == len(places):
+        return "No prices for the stops of this route: " + ", ".join(missing[:3]) + (", ..." if len(missing) > 3 else "")
+    if len(places) - len(missing) < 2:
+        have = [p for p in places if p not in missing]
+        return f"Only {have[0]} of this route has a goods terminal: a trade needs two stops with prices"
+    if max(free_space(plan, capacity)[:-1] or [0]) <= 0:
+        return "The hold is full all along the route"
+    if suggest(plan, capacity, prices, 10 ** 12, illegal):
+        return f"Budget too low ({money(budget or 0)}): raise it" if budget else "No budget set: set one"
+    free = max(free_space(plan, capacity)[:-1])
+    with_prices = [p for p in places if p not in missing]
+    near = suggest(plan, capacity, prices, budget or 0, illegal, min_profit=1, limit=1)
+    if near:
+        t = near[0]
+        return (f"The best one ({t.scu} SCU {t.name}, {stops[t.buy_at].place} to {stops[t.sell_at].place}) earns "
+                f"{money(t.profit)}, under {money(MIN_PROFIT)}; free space is {free} SCU at most")
+    return (f"No good is bought at one stop and sold at a later one (prices at {', '.join(with_prices[:4])}; "
+            f"free space {free} SCU at most)")
 
 
 def money(x):

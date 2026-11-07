@@ -46,6 +46,17 @@ def main():
         str(ROOT / "run_overlay.py"),
     ], check=True)
 
+    # The same engine without a window, for the SC-overlay window (console exe: it starts it hidden).
+    subprocess.run([
+        sys.executable, "-m", "PyInstaller", "--noconfirm", "--onefile", "--console",
+        "--name", "schauling-service",
+        "--add-data", f"{data}{';' if sys.platform == 'win32' else ':'}data",
+        "--add-data", f"{ROOT / 'schauling' / 'rules.json'}{';' if sys.platform == 'win32' else ':'}schauling",
+        "--distpath", str(ROOT / "dist"), "--workpath", str(ROOT / "build" / "pyinstaller-service"),
+        "--specpath", str(ROOT / "build"),
+        str(ROOT / "run_service.py"),
+    ], check=True)
+
     exe = ROOT / "dist" / "SC-hauling.exe"
     # For the release, next to the exe: the updater checks the download.
     digest = hashlib.sha256(exe.read_bytes()).hexdigest()
